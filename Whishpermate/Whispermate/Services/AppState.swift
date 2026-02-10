@@ -241,6 +241,58 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Re-transcribe a recording from its saved audio file
+    func retranscribe(recording: Recording) {
+        DebugLog.info("🔄 AppState.retranscribe(id: \(recording.id))", context: "AppState")
+
+        let audioURL = recording.audioFileURL
+        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+            DebugLog.error("Audio file not found: \(audioURL.path)", context: "AppState")
+            var updated = recording
+            updated.errorMessage = "Audio file not found"
+            updated.status = .failed
+            historyManager.updateRecording(updated)
+            return
+        }
+
+        // Mark as retrying
+        var updated = recording
+        updated.retryCount += 1
+        updated.status = .retrying
+        updated.errorMessage = nil
+        historyManager.updateRecording(updated)
+
+        Task {
+            do {
+                let result = try await performTranscription(
+                    audioURL: audioURL, appContext: nil, clipboardContent: nil, screenContext: nil
+                )
+
+                let wordCount = result.split(separator: " ").count
+                await MainActor.run {
+                    var success = recording
+                    success.transcription = result
+                    success.status = .success
+                    success.errorMessage = nil
+                    success.retryCount = updated.retryCount
+                    success.wordCount = wordCount
+                    historyManager.updateRecording(success)
+                }
+                DebugLog.info("✅ Re-transcription succeeded", context: "AppState")
+
+            } catch {
+                DebugLog.error("❌ Re-transcription failed: \(error)", context: "AppState")
+                await MainActor.run {
+                    var failed = recording
+                    failed.status = .failed
+                    failed.errorMessage = error.localizedDescription
+                    failed.retryCount = updated.retryCount
+                    historyManager.updateRecording(failed)
+                }
+            }
+        }
+    }
+
     // MARK: - Private Methods
 
     private func setupAppStateObservers() {
@@ -321,25 +373,6 @@ class AppState: ObservableObject {
                     }
                 }
 
-                // Build context components (used by all providers)
-                var promptComponents: [String] = []
-
-                if !dictionaryManager.transcriptionHints.isEmpty {
-                    promptComponents.append("Vocabulary: \(dictionaryManager.transcriptionHints)")
-                }
-                if !shortcutManager.transcriptionHints.isEmpty {
-                    promptComponents.append("Phrases: \(shortcutManager.transcriptionHints)")
-                }
-                if let instructions = dictionaryManager.formattingInstructions {
-                    promptComponents.append(instructions)
-                }
-                if let instructions = shortcutManager.formattingInstructions {
-                    promptComponents.append(instructions)
-                }
-                if let instructions = contextRulesManager.instructions(for: capturedAppBundleId, windowTitle: capturedWindowTitle) {
-                    promptComponents.append(instructions)
-                }
-
                 // Get clipboard and screen context (only for dictation mode)
                 let clipboardContent: String?
                 let screenContextForTranscription: String?
@@ -355,233 +388,12 @@ class AppState: ObservableObject {
                     screenContextForTranscription = capturedScreenContext
                 }
 
-                // Transcribe using selected provider
-                let result: String
-                let provider = transcriptionProviderManager.selectedProvider
-                DebugLog.info("Selected transcription provider: \(provider.displayName), isOnDevice: \(provider.isOnDevice)", context: "AppState")
-
-                if provider == .custom {
-                    // Custom (AIDictation): Server handles both transcription and formatting
-                    DebugLog.info("Using Custom (AIDictation) provider - server handles formatting", context: "AppState")
-
-                    guard let transcriptionApiKey = resolvedTranscriptionApiKey() else {
-                        await MainActor.run {
-                            self.recordingState = .idle
-                            self.isProcessing = false
-                            self.errorMessage = "Please set your transcription API key"
-                        }
-                        return
-                    }
-
-                    let config = OpenAIClient.Configuration(
-                        transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
-                        transcriptionModel: transcriptionProviderManager.effectiveModel,
-                        chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
-                        chatCompletionModel: llmProviderManager.effectiveModel,
-                        apiKey: transcriptionApiKey
-                    )
-
-                    if openAIClient == nil {
-                        openAIClient = OpenAIClient(config: config)
-                    } else {
-                        openAIClient?.updateConfig(config)
-                    }
-
-                    guard let client = openAIClient else {
-                        throw NSError(domain: "AppState", code: -1)
-                    }
-
-                    // Custom API handles everything server-side
-                    result = try await client.transcribeAndFormat(
-                        audioURL: audioURL,
-                        prompt: nil,
-                        formattingRules: promptComponents,
-                        languageCodes: languageManager.apiLanguageCode,
-                        appContext: capturedAppContext,
-                        llmApiKey: nil,
-                        clipboardContent: clipboardContent,
-                        screenContext: screenContextForTranscription
-                    )
-
-                } else if provider.isOnDevice {
-                    // Parakeet: Local transcription + optional LLM post-processing
-                    DebugLog.info("Using on-device Parakeet transcription", context: "AppState")
-
-                    let rawText = try await ParakeetTranscriptionService.shared.transcribe(audioURL: audioURL)
-
-                    // Optional LLM post-processing
-                    DebugLog.info("Post-processing check: enabled=\(transcriptionProviderManager.enableLLMPostProcessing), promptComponents=\(promptComponents.count), provider=\(transcriptionProviderManager.postProcessingProvider.displayName)", context: "AppState")
-                    // AIDictation can run without prompt rules (provides basic formatting), custom LLM needs rules
-                    let shouldPostProcess = transcriptionProviderManager.enableLLMPostProcessing &&
-                        (transcriptionProviderManager.postProcessingProvider == .aidictation || !promptComponents.isEmpty)
-                    if shouldPostProcess {
-                        let postProcessor = transcriptionProviderManager.postProcessingProvider
-
-                        if postProcessor == .aidictation,
-                           let endpoint = SecretsLoader.aidictationPostProcessingEndpoint(),
-                           let apiKey = SecretsLoader.aidictationPostProcessingKey()
-                        {
-                            // Use AIDictation cloud for post-processing (free, no user API key needed)
-                            DebugLog.info("Applying AIDictation post-processing to Parakeet transcription", context: "AppState")
-
-                            let config = OpenAIClient.Configuration(
-                                transcriptionEndpoint: "",
-                                transcriptionModel: "",
-                                chatCompletionEndpoint: endpoint,
-                                chatCompletionModel: PostProcessingProvider.aidictationModel,
-                                apiKey: apiKey
-                            )
-
-                            if openAIClient == nil {
-                                openAIClient = OpenAIClient(config: config)
-                            } else {
-                                openAIClient?.updateConfig(config)
-                            }
-
-                            if let client = openAIClient {
-                                result = try await client.applyFormattingRules(
-                                    transcription: rawText,
-                                    rules: promptComponents,
-                                    languageCodes: languageManager.apiLanguageCode,
-                                    appContext: capturedAppContext,
-                                    clipboardContent: nil // Don't use clipboard for post-processing, just correct the transcription
-                                )
-                            } else {
-                                result = rawText
-                            }
-                        } else if postProcessor == .customLLM, let llmApiKey = resolvedLLMApiKey() {
-                            // Use user's custom LLM provider
-                            DebugLog.info("Applying custom LLM post-processing to Parakeet transcription", context: "AppState")
-
-                            let config = OpenAIClient.Configuration(
-                                transcriptionEndpoint: "",
-                                transcriptionModel: "",
-                                chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
-                                chatCompletionModel: llmProviderManager.effectiveModel,
-                                apiKey: llmApiKey
-                            )
-
-                            if openAIClient == nil {
-                                openAIClient = OpenAIClient(config: config)
-                            } else {
-                                openAIClient?.updateConfig(config)
-                            }
-
-                            if let client = openAIClient {
-                                result = try await client.applyFormattingRules(
-                                    transcription: rawText,
-                                    rules: promptComponents,
-                                    languageCodes: languageManager.apiLanguageCode,
-                                    appContext: capturedAppContext,
-                                    clipboardContent: nil // Don't use clipboard for post-processing, just correct the transcription
-                                )
-                            } else {
-                                result = rawText
-                            }
-                        } else {
-                            if postProcessor == .customLLM && resolvedLLMApiKey() == nil {
-                                DebugLog.warning("Custom LLM post-processing enabled but no API key - using raw transcription", context: "AppState")
-                            }
-                            result = rawText
-                        }
-                    } else {
-                        result = rawText
-                    }
-
-                } else {
-                    // Groq/OpenAI: Cloud transcription + optional LLM post-processing
-                    DebugLog.info("Using \(provider.displayName) cloud transcription", context: "AppState")
-
-                    guard let transcriptionApiKey = resolvedTranscriptionApiKey() else {
-                        await MainActor.run {
-                            self.recordingState = .idle
-                            self.isProcessing = false
-                            self.errorMessage = "Please set your \(provider.displayName) API key"
-                        }
-                        return
-                    }
-
-                    let config = OpenAIClient.Configuration(
-                        transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
-                        transcriptionModel: transcriptionProviderManager.effectiveModel,
-                        chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
-                        chatCompletionModel: llmProviderManager.effectiveModel,
-                        apiKey: transcriptionApiKey
-                    )
-
-                    if openAIClient == nil {
-                        openAIClient = OpenAIClient(config: config)
-                    } else {
-                        openAIClient?.updateConfig(config)
-                    }
-
-                    guard let client = openAIClient else {
-                        throw NSError(domain: "AppState", code: -1)
-                    }
-
-                    // Stage 1: Pure transcription
-                    let rawText = try await client.transcribe(audioURL: audioURL)
-
-                    // Stage 2: Optional LLM post-processing
-                    // AIDictation can run without prompt rules (provides basic formatting), custom LLM needs rules
-                    let shouldPostProcess = transcriptionProviderManager.enableLLMPostProcessing &&
-                        (transcriptionProviderManager.postProcessingProvider == .aidictation || !promptComponents.isEmpty)
-                    if shouldPostProcess {
-                        let postProcessor = transcriptionProviderManager.postProcessingProvider
-
-                        if postProcessor == .aidictation,
-                           let endpoint = SecretsLoader.aidictationPostProcessingEndpoint(),
-                           let apiKey = SecretsLoader.aidictationPostProcessingKey()
-                        {
-                            // Use AIDictation cloud for post-processing
-                            DebugLog.info("Applying AIDictation post-processing", context: "AppState")
-
-                            let llmConfig = OpenAIClient.Configuration(
-                                transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
-                                transcriptionModel: transcriptionProviderManager.effectiveModel,
-                                chatCompletionEndpoint: endpoint,
-                                chatCompletionModel: PostProcessingProvider.aidictationModel,
-                                apiKey: apiKey
-                            )
-                            client.updateConfig(llmConfig)
-
-                            result = try await client.applyFormattingRules(
-                                transcription: rawText,
-                                rules: promptComponents,
-                                languageCodes: languageManager.apiLanguageCode,
-                                appContext: capturedAppContext,
-                                clipboardContent: nil // Don't use clipboard for post-processing, just correct the transcription
-                            )
-                        } else if postProcessor == .customLLM, let llmApiKey = resolvedLLMApiKey() {
-                            // Use user's custom LLM provider
-                            DebugLog.info("Applying custom LLM post-processing", context: "AppState")
-
-                            let llmConfig = OpenAIClient.Configuration(
-                                transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
-                                transcriptionModel: transcriptionProviderManager.effectiveModel,
-                                chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
-                                chatCompletionModel: llmProviderManager.effectiveModel,
-                                apiKey: llmApiKey
-                            )
-                            client.updateConfig(llmConfig)
-
-                            result = try await client.applyFormattingRules(
-                                transcription: rawText,
-                                rules: promptComponents,
-                                languageCodes: languageManager.apiLanguageCode,
-                                appContext: capturedAppContext,
-                                clipboardContent: nil // Don't use clipboard for post-processing, just correct the transcription
-                            )
-                        } else {
-                            if postProcessor == .customLLM && resolvedLLMApiKey() == nil {
-                                DebugLog.warning("Custom LLM post-processing enabled but no API key - using raw transcription", context: "AppState")
-                            }
-                            result = rawText
-                        }
-                    } else {
-                        result = rawText
-                    }
-                }
+                let result = try await performTranscription(
+                    audioURL: audioURL,
+                    appContext: capturedAppContext,
+                    clipboardContent: clipboardContent,
+                    screenContext: screenContextForTranscription
+                )
 
                 // Success - save to history
                 let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
@@ -667,6 +479,195 @@ class AppState: ObservableObject {
             // Reset state
             shouldAutoPaste = false
             recordingStartTime = nil
+        }
+    }
+
+    /// Core transcription logic shared by live recording and re-transcription
+    private func performTranscription(
+        audioURL: URL,
+        appContext: String?,
+        clipboardContent: String?,
+        screenContext: String?
+    ) async throws -> String {
+        // Build context components
+        var promptComponents: [String] = []
+
+        if !dictionaryManager.transcriptionHints.isEmpty {
+            promptComponents.append("Vocabulary: \(dictionaryManager.transcriptionHints)")
+        }
+        if !shortcutManager.transcriptionHints.isEmpty {
+            promptComponents.append("Phrases: \(shortcutManager.transcriptionHints)")
+        }
+        if let instructions = dictionaryManager.formattingInstructions {
+            promptComponents.append(instructions)
+        }
+        if let instructions = shortcutManager.formattingInstructions {
+            promptComponents.append(instructions)
+        }
+        if let instructions = contextRulesManager.instructions(for: capturedAppBundleId, windowTitle: capturedWindowTitle) {
+            promptComponents.append(instructions)
+        }
+
+        let provider = transcriptionProviderManager.selectedProvider
+        DebugLog.info("Selected transcription provider: \(provider.displayName), isOnDevice: \(provider.isOnDevice)", context: "AppState")
+
+        if provider == .custom {
+            DebugLog.info("Using Custom (AIDictation) provider - server handles formatting", context: "AppState")
+
+            guard let transcriptionApiKey = resolvedTranscriptionApiKey() else {
+                throw NSError(domain: "AppState", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please set your transcription API key"])
+            }
+
+            let config = OpenAIClient.Configuration(
+                transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
+                transcriptionModel: transcriptionProviderManager.effectiveModel,
+                chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
+                chatCompletionModel: llmProviderManager.effectiveModel,
+                apiKey: transcriptionApiKey
+            )
+
+            if openAIClient == nil {
+                openAIClient = OpenAIClient(config: config)
+            } else {
+                openAIClient?.updateConfig(config)
+            }
+
+            guard let client = openAIClient else {
+                throw NSError(domain: "AppState", code: -1)
+            }
+
+            return try await client.transcribeAndFormat(
+                audioURL: audioURL,
+                prompt: nil,
+                formattingRules: promptComponents,
+                languageCodes: languageManager.apiLanguageCode,
+                appContext: appContext,
+                llmApiKey: nil,
+                clipboardContent: clipboardContent,
+                screenContext: screenContext
+            )
+
+        } else if provider.isOnDevice {
+            DebugLog.info("Using on-device Parakeet transcription", context: "AppState")
+
+            let rawText = try await ParakeetTranscriptionService.shared.transcribe(audioURL: audioURL)
+
+            let shouldPostProcess = transcriptionProviderManager.enableLLMPostProcessing &&
+                (transcriptionProviderManager.postProcessingProvider == .aidictation || !promptComponents.isEmpty)
+            if shouldPostProcess {
+                let postProcessor = transcriptionProviderManager.postProcessingProvider
+
+                if postProcessor == .aidictation,
+                   let endpoint = SecretsLoader.aidictationPostProcessingEndpoint(),
+                   let apiKey = SecretsLoader.aidictationPostProcessingKey()
+                {
+                    DebugLog.info("Applying AIDictation post-processing to Parakeet transcription", context: "AppState")
+                    let config = OpenAIClient.Configuration(
+                        transcriptionEndpoint: "", transcriptionModel: "",
+                        chatCompletionEndpoint: endpoint,
+                        chatCompletionModel: PostProcessingProvider.aidictationModel,
+                        apiKey: apiKey
+                    )
+                    if openAIClient == nil { openAIClient = OpenAIClient(config: config) } else { openAIClient?.updateConfig(config) }
+                    if let client = openAIClient {
+                        return try await client.applyFormattingRules(
+                            transcription: rawText, rules: promptComponents,
+                            languageCodes: languageManager.apiLanguageCode,
+                            appContext: appContext, clipboardContent: nil
+                        )
+                    }
+                } else if postProcessor == .customLLM, let llmApiKey = resolvedLLMApiKey() {
+                    DebugLog.info("Applying custom LLM post-processing to Parakeet transcription", context: "AppState")
+                    let config = OpenAIClient.Configuration(
+                        transcriptionEndpoint: "", transcriptionModel: "",
+                        chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
+                        chatCompletionModel: llmProviderManager.effectiveModel,
+                        apiKey: llmApiKey
+                    )
+                    if openAIClient == nil { openAIClient = OpenAIClient(config: config) } else { openAIClient?.updateConfig(config) }
+                    if let client = openAIClient {
+                        return try await client.applyFormattingRules(
+                            transcription: rawText, rules: promptComponents,
+                            languageCodes: languageManager.apiLanguageCode,
+                            appContext: appContext, clipboardContent: nil
+                        )
+                    }
+                } else if postProcessor == .customLLM && resolvedLLMApiKey() == nil {
+                    DebugLog.warning("Custom LLM post-processing enabled but no API key - using raw transcription", context: "AppState")
+                }
+            }
+            return rawText
+
+        } else {
+            DebugLog.info("Using \(provider.displayName) cloud transcription", context: "AppState")
+
+            guard let transcriptionApiKey = resolvedTranscriptionApiKey() else {
+                throw NSError(domain: "AppState", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please set your \(provider.displayName) API key"])
+            }
+
+            let config = OpenAIClient.Configuration(
+                transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
+                transcriptionModel: transcriptionProviderManager.effectiveModel,
+                chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
+                chatCompletionModel: llmProviderManager.effectiveModel,
+                apiKey: transcriptionApiKey
+            )
+
+            if openAIClient == nil {
+                openAIClient = OpenAIClient(config: config)
+            } else {
+                openAIClient?.updateConfig(config)
+            }
+
+            guard let client = openAIClient else {
+                throw NSError(domain: "AppState", code: -1)
+            }
+
+            let rawText = try await client.transcribe(audioURL: audioURL)
+
+            let shouldPostProcess = transcriptionProviderManager.enableLLMPostProcessing &&
+                (transcriptionProviderManager.postProcessingProvider == .aidictation || !promptComponents.isEmpty)
+            if shouldPostProcess {
+                let postProcessor = transcriptionProviderManager.postProcessingProvider
+
+                if postProcessor == .aidictation,
+                   let endpoint = SecretsLoader.aidictationPostProcessingEndpoint(),
+                   let apiKey = SecretsLoader.aidictationPostProcessingKey()
+                {
+                    DebugLog.info("Applying AIDictation post-processing", context: "AppState")
+                    let llmConfig = OpenAIClient.Configuration(
+                        transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
+                        transcriptionModel: transcriptionProviderManager.effectiveModel,
+                        chatCompletionEndpoint: endpoint,
+                        chatCompletionModel: PostProcessingProvider.aidictationModel,
+                        apiKey: apiKey
+                    )
+                    client.updateConfig(llmConfig)
+                    return try await client.applyFormattingRules(
+                        transcription: rawText, rules: promptComponents,
+                        languageCodes: languageManager.apiLanguageCode,
+                        appContext: appContext, clipboardContent: nil
+                    )
+                } else if postProcessor == .customLLM, let llmApiKey = resolvedLLMApiKey() {
+                    DebugLog.info("Applying custom LLM post-processing", context: "AppState")
+                    let llmConfig = OpenAIClient.Configuration(
+                        transcriptionEndpoint: transcriptionProviderManager.effectiveEndpoint,
+                        transcriptionModel: transcriptionProviderManager.effectiveModel,
+                        chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
+                        chatCompletionModel: llmProviderManager.effectiveModel,
+                        apiKey: llmApiKey
+                    )
+                    client.updateConfig(llmConfig)
+                    return try await client.applyFormattingRules(
+                        transcription: rawText, rules: promptComponents,
+                        languageCodes: languageManager.apiLanguageCode,
+                        appContext: appContext, clipboardContent: nil
+                    )
+                } else if postProcessor == .customLLM && resolvedLLMApiKey() == nil {
+                    DebugLog.warning("Custom LLM post-processing enabled but no API key - using raw transcription", context: "AppState")
+                }
+            }
+            return rawText
         }
     }
 

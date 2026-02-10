@@ -202,8 +202,8 @@ struct HistorySidebarView: View {
         NSPasteboard.general.setString(transcription, forType: .string)
     }
 
-    private func retryTranscription(_: Recording) {
-        // TODO: Implement retry logic
+    private func retryTranscription(_ recording: Recording) {
+        AppState.shared.retranscribe(recording: recording)
     }
 
     private func revealInFinder(_ recording: Recording) {
@@ -391,8 +391,7 @@ struct RecordingDetailView: View {
     }
 
     private func retryTranscription() {
-        // TODO: Implement retry logic
-        // This would need to re-transcribe the audio file from recording.audioFileURL
+        AppState.shared.retranscribe(recording: recording)
     }
 
     private func deleteRecording() {

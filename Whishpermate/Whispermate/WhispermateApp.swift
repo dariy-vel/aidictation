@@ -47,7 +47,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        showMainSettingsWindow()
+        // Don't show settings window during recording/transcription/pasting
+        let state = AppState.shared
+        if state.recordingState != .idle || state.isProcessing {
+            return false
+        }
+        if !hasVisibleWindows {
+            showMainSettingsWindow()
+        }
         return true
     }
 
@@ -55,6 +62,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Ensure window is always properly configured when app becomes active
         if mainWindow == nil {
             configureMainWindow()
+        }
+        // Don't let macOS auto-restore the settings window during recording/transcription
+        let state = AppState.shared
+        if state.recordingState != .idle || state.isProcessing {
+            mainWindow?.orderOut(nil)
         }
     }
 
@@ -329,9 +341,7 @@ func showMainSettingsWindow() {
 
     // Find the main window and show it
     for window in NSApplication.shared.windows {
-        if window.identifier == WindowIdentifiers.main ||
-           window.title == "AIDictation" ||
-           (window.contentView != nil && window.level == .normal) {
+        if window.identifier == WindowIdentifiers.main || window.title == "AIDictation" {
             window.setIsVisible(true)
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
