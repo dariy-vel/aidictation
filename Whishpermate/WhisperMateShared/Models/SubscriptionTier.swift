@@ -18,6 +18,12 @@ public enum UsageLimits {
 public enum SubscriptionTier: String, Codable {
     case free
     case pro
+    case lifetime
+
+    /// Whether the user has a paid subscription (pro or lifetime)
+    public var isPaid: Bool {
+        self == .pro || self == .lifetime
+    }
 
     public var displayName: String {
         switch self {
@@ -25,6 +31,8 @@ public enum SubscriptionTier: String, Codable {
             return "Free Trial"
         case .pro:
             return "Pro"
+        case .lifetime:
+            return "Lifetime"
         }
     }
 
@@ -32,7 +40,7 @@ public enum SubscriptionTier: String, Codable {
         switch self {
         case .free:
             return UsageLimits.freeMonthlyWordLimit
-        case .pro:
+        case .pro, .lifetime:
             return Int.max // Unlimited
         }
     }
@@ -43,6 +51,8 @@ public enum SubscriptionTier: String, Codable {
             return "$0"
         case .pro:
             return "$9.99/month"
+        case .lifetime:
+            return "One-time purchase"
         }
     }
 
@@ -54,7 +64,7 @@ public enum SubscriptionTier: String, Codable {
                 "Full transcription features",
                 "Local storage",
             ]
-        case .pro:
+        case .pro, .lifetime:
             return [
                 "Unlimited transcriptions",
                 "Included API access",

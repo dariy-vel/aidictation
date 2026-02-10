@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+internal import Combine
 import SwiftUI
 import WhisperMateShared
 
@@ -57,7 +59,9 @@ struct HistoryMasterDetailView: View {
                 Color.clear.frame(height: 0)
             }
         } detail: {
-            if let recording = selectedRecording {
+            if let selectedId = selectedRecording?.id,
+               let recording = historyManager.recordings.first(where: { $0.id == selectedId })
+            {
                 RecordingDetailView(
                     recording: recording,
                     historyManager: historyManager,
@@ -88,7 +92,7 @@ struct HistoryMasterDetailView: View {
                         selectedRecording = nextSelection
                     }
                 )
-                .id(recording.id)
+                .id("\(recording.id)-\(recording.status)-\(recording.transcription?.hashValue ?? 0)")
             } else {
                 // Empty state when no recording is selected
                 VStack(spacing: 12) {
@@ -279,6 +283,7 @@ struct RecordingDetailView: View {
     let columnVisibility: NavigationSplitViewVisibility
     let onDelete: (Recording) -> Void
     @State private var showCopiedNotification = false
+    @StateObject private var audioPlayer = AudioPlayerModel()
 
     // Compute dynamic padding based on sidebar visibility
     private var leadingPadding: CGFloat {
@@ -293,10 +298,20 @@ struct RecordingDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Transcription or error
-                    if let transcription = recording.transcription {
+                    if recording.status == .retrying {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Re-transcribing…")
+                                .dsFont(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                        .transition(.opacity)
+                    } else if let transcription = recording.transcription {
                         Text(transcription)
                             .textSelection(.enabled)
                             .dsFont(.body)
+                            .transition(.opacity)
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Transcription Failed")
@@ -309,10 +324,12 @@ struct RecordingDetailView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+                        .transition(.opacity)
                     }
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.easeInOut(duration: 0.3), value: recording.status)
             }
 
             Spacer()
@@ -339,6 +356,26 @@ struct RecordingDetailView: View {
                         .foregroundStyle(.orange)
                 }
 
+                // Play button
+                Button(action: togglePlayback) {
+                    Label(
+                        audioPlayer.isPlaying ? "Stop" : "Play",
+                        systemImage: audioPlayer.isPlaying ? "stop.fill" : "play.fill"
+                    )
+                }
+                .disabled(!FileManager.default.fileExists(atPath: recording.audioFileURL.path))
+
+                // Re-transcribe button
+                if recording.status == .retrying {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button(action: retryTranscription) {
+                        Label("Re-transcribe", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(recording.retryCount >= 3)
+                }
+
                 // Copy button
                 Button(action: copyTranscription) {
                     Label("Copy", systemImage: showCopiedNotification ? "checkmark" : "doc.on.doc")
@@ -358,14 +395,6 @@ struct RecordingDetailView: View {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
                 .disabled(recording.transcription == nil)
-
-                // Retry button (failed recordings only)
-                if recording.status == .failed {
-                    Button(action: retryTranscription) {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(recording.retryCount >= 3)
-                }
 
                 // Delete button - last item
                 Button(action: deleteRecording) {
@@ -387,6 +416,14 @@ struct RecordingDetailView: View {
         showCopiedNotification = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             showCopiedNotification = false
+        }
+    }
+
+    private func togglePlayback() {
+        if audioPlayer.isPlaying {
+            audioPlayer.stop()
+        } else {
+            audioPlayer.play(url: recording.audioFileURL)
         }
     }
 
@@ -422,6 +459,36 @@ struct RecordingDetailView: View {
 
         // Open URL in default browser or app
         NSWorkspace.shared.open(url)
+    }
+}
+
+/// Simple audio player for playback of recorded audio
+class AudioPlayerModel: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var isPlaying = false
+    private var player: AVAudioPlayer?
+
+    func play(url: URL) {
+        stop()
+        do {
+            player = try AVAudioPlayer(contentsOf: url)
+            player?.delegate = self
+            player?.play()
+            isPlaying = true
+        } catch {
+            DebugLog.error("Failed to play audio: \(error)", context: "AudioPlayerModel")
+        }
+    }
+
+    func stop() {
+        player?.stop()
+        player = nil
+        isPlaying = false
+    }
+
+    func audioPlayerDidFinishPlaying(_: AVAudioPlayer, successfully _: Bool) {
+        DispatchQueue.main.async {
+            self.isPlaying = false
+        }
     }
 }
 

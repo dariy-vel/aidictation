@@ -351,12 +351,14 @@ class AppState: ObservableObject {
 
                 // VAD check first
                 if vadSettingsManager.vadEnabled {
-                    DebugLog.info("🎤 VAD check...", context: "AppState")
+                    let vadStart = CFAbsoluteTimeGetCurrent()
 
                     let hasSpeech = try await VoiceActivityDetector.hasSpeech(
                         in: audioURL,
                         settings: vadSettingsManager
                     )
+                    let vadMs = Int((CFAbsoluteTimeGetCurrent() - vadStart) * 1000)
+                    DebugLog.info("⏱️ VAD took \(vadMs)ms, hasSpeech=\(hasSpeech)", context: "AppState")
 
                     if !hasSpeech {
                         DebugLog.info("🔇 No speech detected", context: "AppState")
@@ -388,12 +390,15 @@ class AppState: ObservableObject {
                     screenContextForTranscription = capturedScreenContext
                 }
 
+                let transcriptionStart = CFAbsoluteTimeGetCurrent()
                 let result = try await performTranscription(
                     audioURL: audioURL,
                     appContext: capturedAppContext,
                     clipboardContent: clipboardContent,
                     screenContext: screenContextForTranscription
                 )
+                let transcriptionMs = Int((CFAbsoluteTimeGetCurrent() - transcriptionStart) * 1000)
+                DebugLog.info("⏱️ Transcription took \(transcriptionMs)ms", context: "AppState")
 
                 // Success - save to history
                 let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
@@ -550,53 +555,10 @@ class AppState: ObservableObject {
         } else if provider.isOnDevice {
             DebugLog.info("Using on-device Parakeet transcription", context: "AppState")
 
-            let rawText = try await ParakeetTranscriptionService.shared.transcribe(audioURL: audioURL)
-
-            let shouldPostProcess = transcriptionProviderManager.enableLLMPostProcessing &&
-                (transcriptionProviderManager.postProcessingProvider == .aidictation || !promptComponents.isEmpty)
-            if shouldPostProcess {
-                let postProcessor = transcriptionProviderManager.postProcessingProvider
-
-                if postProcessor == .aidictation,
-                   let endpoint = SecretsLoader.aidictationPostProcessingEndpoint(),
-                   let apiKey = SecretsLoader.aidictationPostProcessingKey()
-                {
-                    DebugLog.info("Applying AIDictation post-processing to Parakeet transcription", context: "AppState")
-                    let config = OpenAIClient.Configuration(
-                        transcriptionEndpoint: "", transcriptionModel: "",
-                        chatCompletionEndpoint: endpoint,
-                        chatCompletionModel: PostProcessingProvider.aidictationModel,
-                        apiKey: apiKey
-                    )
-                    if openAIClient == nil { openAIClient = OpenAIClient(config: config) } else { openAIClient?.updateConfig(config) }
-                    if let client = openAIClient {
-                        return try await client.applyFormattingRules(
-                            transcription: rawText, rules: promptComponents,
-                            languageCodes: languageManager.apiLanguageCode,
-                            appContext: appContext, clipboardContent: nil
-                        )
-                    }
-                } else if postProcessor == .customLLM, let llmApiKey = resolvedLLMApiKey() {
-                    DebugLog.info("Applying custom LLM post-processing to Parakeet transcription", context: "AppState")
-                    let config = OpenAIClient.Configuration(
-                        transcriptionEndpoint: "", transcriptionModel: "",
-                        chatCompletionEndpoint: llmProviderManager.effectiveEndpoint,
-                        chatCompletionModel: llmProviderManager.effectiveModel,
-                        apiKey: llmApiKey
-                    )
-                    if openAIClient == nil { openAIClient = OpenAIClient(config: config) } else { openAIClient?.updateConfig(config) }
-                    if let client = openAIClient {
-                        return try await client.applyFormattingRules(
-                            transcription: rawText, rules: promptComponents,
-                            languageCodes: languageManager.apiLanguageCode,
-                            appContext: appContext, clipboardContent: nil
-                        )
-                    }
-                } else if postProcessor == .customLLM && resolvedLLMApiKey() == nil {
-                    DebugLog.warning("Custom LLM post-processing enabled but no API key - using raw transcription", context: "AppState")
-                }
-            }
-            return rawText
+            var text = try await ParakeetTranscriptionService.shared.transcribe(audioURL: audioURL)
+            text = TranscriptionOutputFilter.filter(text)
+            text = dictionaryManager.applyReplacements(to: text)
+            return text
 
         } else {
             DebugLog.info("Using \(provider.displayName) cloud transcription", context: "AppState")

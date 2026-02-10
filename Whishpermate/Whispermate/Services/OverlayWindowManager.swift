@@ -269,14 +269,16 @@ class OverlayWindowManager: ObservableObject {
     func expandToFullMode() {
         DebugLog.info("expandToFullMode() - bringing app to foreground", context: "OverlayWindowManager")
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApplication.shared.windows.first(where: { $0.level == .normal }) {
+        if let window = findMainWindow() {
             window.makeKeyAndOrderFront(nil)
+        } else {
+            showMainSettingsWindow()
         }
     }
 
     func contractToOverlay() {
         DebugLog.info("contractToOverlay() - sending app to background", context: "OverlayWindowManager")
-        if let window = NSApplication.shared.windows.first(where: { $0.level == .normal }) {
+        if let window = findMainWindow() {
             window.orderOut(nil)
         }
         NSApp.hide(nil)

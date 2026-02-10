@@ -58,7 +58,7 @@ public class SubscriptionManager: ObservableObject {
         }
 
         if let user = authManager.currentUser {
-            if user.subscriptionTier == .pro || user.stripeSubscriptionId != nil {
+            if user.subscriptionTier.isPaid || user.stripeSubscriptionId != nil {
                 DebugLog.info("Upgrade skipped: user already has an active subscription", context: "SubscriptionManager")
                 return
             }
@@ -99,11 +99,11 @@ public class SubscriptionManager: ObservableObject {
 
     public func getUsageStatus() -> (used: Int, limit: Int, percentage: Double, isPro: Bool) {
         if let user = authManager.currentUser {
-            let isPro = user.subscriptionTier == .pro
+            let isPaid = user.subscriptionTier.isPaid
             let limit = user.subscriptionTier.wordLimit
             let used = user.totalWordsUsed
-            let percentage = isPro ? 0.0 : user.usagePercentage
-            return (used, limit, percentage, isPro)
+            let percentage = isPaid ? 0.0 : user.usagePercentage
+            return (used, limit, percentage, isPaid)
         } else {
             // Anonymous user - use local tracking
             checkAndResetLocalIfNeeded()
@@ -119,8 +119,8 @@ public class SubscriptionManager: ObservableObject {
             return false
         }
 
-        // Don't show for pro users
-        if user.subscriptionTier == .pro {
+        // Don't show for paid users
+        if user.subscriptionTier.isPaid {
             return false
         }
 

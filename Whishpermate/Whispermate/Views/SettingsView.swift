@@ -224,9 +224,9 @@ struct SettingsView: View {
                                 Text("Subscription")
                                     .dsFont(.body)
                                     .foregroundStyle(Color.dsForeground)
-                                Text(user.subscriptionTier == .pro ? "Pro" : "Free")
+                                Text(user.subscriptionTier.displayName)
                                     .dsFont(.label)
-                                    .foregroundStyle(user.subscriptionTier == .pro ? Color.dsSecondary : Color.dsMutedForeground)
+                                    .foregroundStyle(user.subscriptionTier.isPaid ? Color.dsSecondary : Color.dsMutedForeground)
                             }
                             Spacer()
                         }
@@ -342,7 +342,7 @@ struct SettingsView: View {
     }
 
     private var isPro: Bool {
-        authManager.isAuthenticated && authManager.currentUser?.subscriptionTier == .pro
+        authManager.isAuthenticated && (authManager.currentUser?.subscriptionTier.isPaid ?? false)
     }
 
     private func getResetDate() -> String? {
@@ -366,7 +366,7 @@ struct SettingsView: View {
             return
         }
 
-        if let user = authManager.currentUser, user.subscriptionTier == .pro {
+        if let user = authManager.currentUser, user.subscriptionTier.isPaid {
             return
         }
 
@@ -483,9 +483,9 @@ struct SettingsView: View {
                 // Refresh user data
                 await authManager.refreshUser()
 
-                // Check if subscription status changed to pro
-                if authManager.currentUser?.subscriptionTier == .pro {
-                    DebugLog.info("✅ Payment confirmed! User is now Pro", context: "SettingsView")
+                // Check if subscription status changed to paid
+                if authManager.currentUser?.subscriptionTier.isPaid == true {
+                    DebugLog.info("✅ Payment confirmed! User is now \(authManager.currentUser?.subscriptionTier.displayName ?? "paid")", context: "SettingsView")
                     await MainActor.run {
                         isCheckingPayment = false
                     }
@@ -576,6 +576,79 @@ struct SettingsView: View {
                     .padding(.vertical, 2)
                 }
             }
+
+            // Transcription Mode
+            SettingsCard {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Transcription Mode")
+                                .dsFont(.body)
+                                .foregroundStyle(Color.dsForeground)
+                            Text(transcriptionProviderManager.isLocalMode
+                                ? "On-device, instant response, good quality"
+                                : "Cloud-based, slower response, excellent quality")
+                                .dsFont(.label)
+                                .foregroundStyle(Color.dsMutedForeground)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { transcriptionProviderManager.isLocalMode },
+                            set: { transcriptionProviderManager.isLocalMode = $0 }
+                        )) {
+                            Text("Cloud").tag(false)
+                            Text("Local").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                    }
+                    .padding(.vertical, 2)
+
+                    // Parakeet model status (only when local is selected)
+                    if transcriptionProviderManager.isLocalMode {
+                        Divider()
+                            .padding(.vertical, 6)
+
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Model Status")
+                                    .dsFont(.body)
+                                    .foregroundStyle(Color.dsForeground)
+                                Text(parakeetStatusText)
+                                    .dsFont(.label)
+                                    .foregroundStyle(parakeetStatusColor)
+                            }
+                            Spacer()
+
+                            switch parakeetService.state {
+                            case .notInitialized:
+                                Button("Download Model") {
+                                    Task {
+                                        try? await parakeetService.initialize()
+                                    }
+                                }
+                                .controlSize(.small)
+                            case .downloading, .initializing:
+                                ProgressView()
+                                    .controlSize(.small)
+                            case .ready, .transcribing:
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            case .error:
+                                Button("Retry") {
+                                    parakeetService.cleanup()
+                                    Task {
+                                        try? await parakeetService.initialize()
+                                    }
+                                }
+                                .controlSize(.small)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: transcriptionProviderManager.isLocalMode)
 
             // Overlay Settings Group
             SettingsCard {
@@ -1177,7 +1250,29 @@ struct SettingsView: View {
 
     private var contextRulesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ContextRulesTabView(manager: contextRulesManager)
+            if transcriptionProviderManager.selectedProvider.isOnDevice {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle")
+                                .foregroundColor(.secondary)
+                            Text("Context rules require a cloud transcription provider with LLM post-processing. They are not available with on-device transcription.")
+                                .foregroundColor(.secondary)
+                                .font(.callout)
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Go to Settings") {
+                                selectedSection = .general
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(4)
+                }
+            } else {
+                ContextRulesTabView(manager: contextRulesManager)
+            }
         }
     }
 
@@ -1310,7 +1405,7 @@ struct SidebarAccountStatusView: View {
                 HStack(spacing: 4) {
                     Image(systemName: isPro ? "star.fill" : "person.fill")
                         .font(.caption2)
-                    Text(isPro ? "Pro" : "Free")
+                    Text(authManager.currentUser?.subscriptionTier.displayName ?? (isPro ? "Pro" : "Free"))
                         .font(.caption)
                         .fontWeight(.medium)
                 }

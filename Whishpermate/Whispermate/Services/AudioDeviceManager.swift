@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import WhisperMateShared
 
 /// Manages audio input device enumeration and selection using Core Audio
 class AudioDeviceManager {
@@ -134,6 +135,32 @@ class AudioDeviceManager {
         } else {
             DebugLog.info("Failed to set default input device, status: \(status)", context: "AudioDeviceManager")
             return false
+        }
+    }
+
+    /// Re-apply the user's preferred device when the device list changes (e.g. mic connected/disconnected)
+    func reapplyPreferredDevice() {
+        guard let savedUID = AppDefaults.shared.string(forKey: "selectedAudioDeviceID") else { return }
+
+        let devices = getInputDevices()
+        if let preferred = devices.first(where: { $0.uniqueID == savedUID }) {
+            // Preferred device is available - ensure it's set as default
+            let current = getDefaultInputDevice()
+            if current?.uniqueID != preferred.uniqueID {
+                DebugLog.info("Reconnected preferred device: \(preferred.name)", context: "AudioDeviceManager")
+                _ = setDefaultInputDevice(deviceID: preferred.id)
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("AudioInputDeviceChanged"),
+                    object: preferred.uniqueID
+                )
+            }
+        } else {
+            // Preferred device disconnected - notify so AudioRecorder reinitializes with system default
+            DebugLog.info("Preferred device disconnected, falling back to system default", context: "AudioDeviceManager")
+            NotificationCenter.default.post(
+                name: NSNotification.Name("AudioInputDeviceChanged"),
+                object: nil
+            )
         }
     }
 
@@ -275,6 +302,9 @@ private func deviceListChangedCallback(
     _: UnsafeMutableRawPointer?
 ) -> OSStatus {
     DispatchQueue.main.async {
+        // Re-apply saved device preference when devices change
+        AudioDeviceManager.shared.reapplyPreferredDevice()
+
         NotificationCenter.default.post(
             name: NSNotification.Name("AudioDeviceListChanged"),
             object: nil

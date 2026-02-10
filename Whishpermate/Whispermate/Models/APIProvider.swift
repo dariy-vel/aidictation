@@ -1,4 +1,5 @@
 import Foundation
+import WhisperMateShared
 internal import Combine
 
 // MARK: - Transcription Provider
@@ -98,9 +99,27 @@ class TranscriptionProviderManager: ObservableObject {
     @Published var enableLLMPostProcessing: Bool = false
     @Published var postProcessingProvider: PostProcessingProvider = .aidictation
 
+    private enum Keys {
+        static let selectedProvider = "transcriptionProvider"
+    }
+
+    /// Whether the user prefers on-device transcription
+    var isLocalMode: Bool {
+        get { selectedProvider == .parakeet }
+        set {
+            let provider: TranscriptionProvider = newValue ? .parakeet : .custom
+            setProvider(provider)
+        }
+    }
+
     init() {
-        // Always use .custom provider - no UserDefaults reading
-        selectedProvider = .custom
+        if let saved = AppDefaults.shared.string(forKey: Keys.selectedProvider),
+           let provider = TranscriptionProvider(rawValue: saved)
+        {
+            selectedProvider = provider
+        } else {
+            selectedProvider = .custom
+        }
         enableLLMPostProcessing = false
         postProcessingProvider = .aidictation
         DebugLog.info("Loaded: \(selectedProvider.displayName), LLM post-processing: \(enableLLMPostProcessing), post-processor: \(postProcessingProvider.displayName)", context: "TranscriptionProviderManager")
@@ -108,6 +127,7 @@ class TranscriptionProviderManager: ObservableObject {
 
     func setProvider(_ provider: TranscriptionProvider) {
         selectedProvider = provider
+        AppDefaults.shared.set(provider.rawValue, forKey: Keys.selectedProvider)
         DebugLog.info("Set provider: \(provider.displayName)", context: "TranscriptionProviderManager")
     }
 

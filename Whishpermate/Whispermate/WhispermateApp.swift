@@ -30,9 +30,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Disable automatic window restoration for all windows except main
         AppDefaults.shared.set(false, forKey: "NSQuitAlwaysKeepsWindows")
 
-        // Configure window immediately - no async delay
-        configureMainWindow()
-
         // Set up hotkey callbacks once at app startup
         // This ensures they persist throughout the app lifecycle
         setupHotkeyCallbacks()
@@ -52,9 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if state.recordingState != .idle || state.isProcessing {
             return false
         }
-        if !hasVisibleWindows {
-            showMainSettingsWindow()
-        }
+        showMainSettingsWindow()
         return true
     }
 
@@ -137,12 +132,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showMainSettingsWindow()
     }
 
-    private func configureMainWindow() {
-        guard let window = NSApplication.shared.windows.first(where: { $0.level == .normal }) else {
-            // Window not ready yet, try again shortly
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.configureMainWindow()
-            }
+    func configureMainWindow() {
+        guard let window = findMainWindow()
+            ?? NSApplication.shared.windows.first(where: { $0.level == .normal }) else {
             return
         }
 
@@ -249,7 +241,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             // If onboarding is needed, open it directly
             if self.onboardingManager.showOnboarding {
-                NotificationCenter.default.post(name: .openOnboardingWindow, object: nil)
+                WindowBridge.openWindow?("onboarding")
             }
         }
     }
@@ -325,28 +317,38 @@ extension View {
 }
 
 /// Global function to show main window - can be called from anywhere
-/// If onboarding is not complete, shows onboarding window instead
-func showMainSettingsWindow() {
+func showMainSettingsWindow(retryCount: Int = 0) {
     NSApplication.shared.activate(ignoringOtherApps: true)
 
-    // Check if onboarding is needed - if so, show onboarding instead of settings
-    let onboardingManager = OnboardingManager.shared
-    onboardingManager.checkOnboardingStatus()
-
-    if onboardingManager.showOnboarding {
-        // Open onboarding window instead
-        NotificationCenter.default.post(name: .openOnboardingWindow, object: nil)
+    // Find the main window and show it
+    if let window = findMainWindow() {
+        // Ensure window is configured
+        if let appDelegate = NSApp.delegate as? AppDelegate, appDelegate.mainWindow == nil {
+            appDelegate.configureMainWindow()
+        }
+        window.setIsVisible(true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         return
     }
 
-    // Find the main window and show it
-    for window in NSApplication.shared.windows {
-        if window.identifier == WindowIdentifiers.main || window.title == "AIDictation" {
-            window.setIsVisible(true)
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-            return
+    // Also try by title (window may exist but identifier not yet set)
+    for window in NSApplication.shared.windows where window.title == "AIDictation" {
+        window.setIsVisible(true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        return
+    }
+
+    // Window doesn't exist yet — ask SwiftUI to create it, then retry
+    if retryCount < 3 {
+        DebugLog.info("showMainSettingsWindow: window not found, requesting creation (attempt \(retryCount + 1))", context: "WindowManagement")
+        WindowBridge.openWindow?("main")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            showMainSettingsWindow(retryCount: retryCount + 1)
         }
+    } else {
+        DebugLog.info("showMainSettingsWindow: failed to find/create window after 3 attempts", context: "WindowManagement")
     }
 }
 
@@ -364,8 +366,13 @@ func showHistoryWindow() {
         }
     }
 
-    // Window doesn't exist yet - post notification for SwiftUI to open it
-    NotificationCenter.default.post(name: .openHistoryWindow, object: nil)
+    // Window doesn't exist yet - ask SwiftUI to create it
+    WindowBridge.openWindow?("history")
+}
+
+/// Bridges SwiftUI's openWindow action to AppKit code
+enum WindowBridge {
+    static var openWindow: ((String) -> Void)?
 }
 
 @main
@@ -399,17 +406,13 @@ struct WhishpermateApp: App {
     }
 
     var body: some Scene {
+        // Store openWindow action globally so AppKit code can open SwiftUI windows
+        let _ = { WindowBridge.openWindow = { [openWindow] id in openWindow(id: id) } }()
+
         // Main window is now Settings
         Window("AIDictation", id: "main") {
             SettingsWindowView()
                 .windowIdentifier(WindowIdentifiers.main)
-                // URL handling is done in AppDelegate.application(_:open:) for menu bar apps
-                .onReceive(NotificationCenter.default.publisher(for: .openHistoryWindow)) { _ in
-                    openWindow(id: "history")
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .openOnboardingWindow)) { _ in
-                    openWindow(id: "onboarding")
-                }
         }
         .windowResizability(.contentSize)
         .windowStyle(.titleBar)

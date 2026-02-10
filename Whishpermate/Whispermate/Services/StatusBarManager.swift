@@ -10,6 +10,30 @@ enum WindowIdentifiers {
     static let onboarding = NSUserInterfaceItemIdentifier("onboarding")
 }
 
+/// Finds the main settings window reliably across all lifecycle states
+func findMainWindow() -> NSWindow? {
+    // 1. Try by identifier (most reliable when set)
+    if let window = NSApplication.shared.windows.first(where: { $0.identifier == WindowIdentifiers.main }) {
+        DebugLog.info("findMainWindow: found by identifier", context: "WindowManagement")
+        return window
+    }
+    // 2. Try via AppDelegate's cached strong reference
+    if let appDelegate = NSApp.delegate as? AppDelegate, let window = appDelegate.mainWindow {
+        DebugLog.info("findMainWindow: found via AppDelegate.mainWindow", context: "WindowManagement")
+        return window
+    }
+    // 3. Fallback: .normal level window excluding known non-main windows
+    let fallback = NSApplication.shared.windows.first(where: {
+        $0.level == .normal
+            && $0.identifier != WindowIdentifiers.history
+            && $0.identifier != WindowIdentifiers.onboarding
+    })
+    if fallback != nil {
+        DebugLog.info("findMainWindow: found by .normal level fallback", context: "WindowManagement")
+    }
+    return fallback
+}
+
 // MARK: - Notification Names
 
 extension NSNotification.Name {
@@ -20,8 +44,6 @@ extension NSNotification.Name {
     static let recordingStarted = NSNotification.Name("RecordingStarted")
     static let recordingCompleted = NSNotification.Name("RecordingCompleted")
     static let recordingReadyForTranscription = NSNotification.Name("RecordingReadyForTranscription")
-    static let openHistoryWindow = NSNotification.Name("OpenHistoryWindow")
-    static let openOnboardingWindow = NSNotification.Name("OpenOnboardingWindow")
     static let openAccountSettings = NSNotification.Name("OpenAccountSettings")
 }
 
@@ -120,8 +142,8 @@ class StatusBarManager {
     // MARK: - Private Methods
 
     @objc private func toggleWindow() {
-        // Use stored window reference if available, otherwise fall back to first window
-        let window = appWindow ?? NSApplication.shared.windows.first(where: { $0.level == .normal })
+        // Use stored window reference if available, otherwise find by identifier
+        let window = appWindow ?? findMainWindow()
 
         if let window = window {
             if window.isVisible {
@@ -131,7 +153,7 @@ class StatusBarManager {
                 window.makeKeyAndOrderFront(nil)
             }
         } else {
-            DebugLog.info("Warning: Could not find app window to toggle", context: "StatusBarManager")
+            showMainSettingsWindow()
         }
     }
 

@@ -32,7 +32,7 @@ struct SettingsWindowView: View {
             }
             // Reset onboarding state and open fresh onboarding window
             onboardingManager.resetOnboarding()
-            NotificationCenter.default.post(name: .openOnboardingWindow, object: nil)
+            WindowBridge.openWindow?("onboarding")
         }
         .onReceive(NotificationCenter.default.publisher(for: .onboardingComplete)) { _ in
             // Close onboarding window

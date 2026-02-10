@@ -21,7 +21,11 @@ public struct User: Codable, Identifiable {
 
     // Computed property for compatibility
     public var subscriptionTier: SubscriptionTier {
-        subscriptionStatus == "pro" ? .pro : .free
+        switch subscriptionStatus {
+        case "pro": return .pro
+        case "lifetime": return .lifetime
+        default: return .free
+        }
     }
 
     // Compatibility property
@@ -50,8 +54,8 @@ public struct User: Codable, Identifiable {
 
     /// Check if word count needs to be reset (new month has started)
     public var needsWordCountReset: Bool {
-        // Pro users don't need reset
-        guard subscriptionTier == .free else { return false }
+        // Paid users don't need reset
+        guard !subscriptionTier.isPaid else { return false }
         // If reset date was never set, we need to set it (don't reset count, just init date)
         guard let resetAt = wordCountResetAt else { return false }
         // Check if reset date has passed
