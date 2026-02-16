@@ -10,7 +10,7 @@ enum OverlayPosition: String, CaseIterable, Codable {
 }
 
 /// Custom NSWindow that doesn't become key or main, preventing app activation on click
-private class NonActivatingWindow: NSWindow {
+private class NonActivatingWindow: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
@@ -119,6 +119,8 @@ class OverlayWindowManager: ObservableObject {
 
     private var overlayWindow: NSWindow?
     private var screenChangeObserver: Any?
+    private var spaceChangeObserver: Any?
+    private var appActivationObserver: Any?
     private var audioLevelCancellable: AnyCancellable?
     private var frequencyBandsCancellable: AnyCancellable?
 
@@ -126,23 +128,32 @@ class OverlayWindowManager: ObservableObject {
 
     private init() {
         setupScreenChangeObserver()
+        setupSpaceChangeObserver()
+        setupAppActivationObserver()
         setupAudioObservers()
     }
 
     // MARK: - Public API
 
     func show() {
-        DebugLog.info("show() called", context: "OverlayWindowManager")
+        DebugLog.info("show() called, overlayState=\(overlayState), hideIdleState=\(hideIdleState)", context: "OverlayWindowManager")
+        logWindowState("show-before")
         if overlayWindow == nil {
             createWindow()
         }
+        repositionWindow()
         overlayWindow?.orderFrontRegardless()
-        DebugLog.info("Window ordered front", context: "OverlayWindowManager")
+        logWindowState("show-after-orderFront")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.logWindowState("show-post-tick")
+        }
     }
 
     func hide() {
-        DebugLog.info("hide() called", context: "OverlayWindowManager")
+        DebugLog.info("hide() called, overlayState=\(overlayState)", context: "OverlayWindowManager")
+        logWindowState("hide-before")
         overlayWindow?.orderOut(nil)
+        logWindowState("hide-after-orderOut")
     }
 
     // MARK: - State Transitions (single entry point for all state changes)
@@ -150,6 +161,7 @@ class OverlayWindowManager: ObservableObject {
     /// Transition to a new overlay state - single source of truth for state changes
     func transition(to newState: OverlayState) {
         DebugLog.info("transition: \(overlayState) -> \(newState)", context: "OverlayWindowManager")
+        logWindowState("transition-before")
 
         // Ensure we're on main thread for UI updates
         if !Thread.isMainThread {
@@ -208,16 +220,23 @@ class OverlayWindowManager: ObservableObject {
             overlayWindow?.orderFrontRegardless()
             updateWindowSizeForState(newState, animated: true)
         }
+
+        ensureWindowOnActiveSpace(reason: "transition")
+        logWindowState("transition-after")
     }
 
     private func ensureWindowExists() {
         if overlayWindow == nil {
+            DebugLog.info("ensureWindowExists: creating window", context: "OverlayWindowManager")
             createWindow()
         }
     }
 
     private func updateWindowSizeForState(_ state: OverlayState, animated: Bool) {
-        guard let window = overlayWindow, let screen = NSScreen.main else { return }
+        guard let window = overlayWindow, let screen = targetScreen() else {
+            DebugLog.warning("updateWindowSizeForState skipped: window or target screen missing", context: "OverlayWindowManager")
+            return
+        }
 
         let screenFrame = screen.visibleFrame
         let isActive = state == .recording(isCommandMode: true) ||
@@ -237,12 +256,18 @@ class OverlayWindowManager: ObservableObject {
 
         let (xPos, yPos) = calculatePosition(for: position, screenFrame: screenFrame, windowWidth: windowWidth, windowHeight: windowHeight)
         let newFrame = NSRect(x: xPos, y: yPos, width: windowWidth, height: windowHeight)
+        let oldFrame = window.frame
+        DebugLog.info(
+            "updateWindowSizeForState state=\(state), animated=\(animated), screen=\(describeScreen(screen)), oldFrame=\(formatRect(oldFrame)), newFrame=\(formatRect(newFrame))",
+            context: "OverlayWindowManager"
+        )
 
         if animated {
             window.setFrame(newFrame, display: true, animate: false)
         } else {
             window.setFrame(newFrame, display: true)
         }
+        logWindowState("updateWindowSizeForState-after-setFrame")
     }
 
     // MARK: - Legacy API (for backward compatibility during migration)
@@ -296,6 +321,27 @@ class OverlayWindowManager: ObservableObject {
 
     // MARK: - Private Methods
 
+    private func formatRect(_ rect: NSRect) -> String {
+        "x=\(Int(rect.origin.x)) y=\(Int(rect.origin.y)) w=\(Int(rect.width)) h=\(Int(rect.height))"
+    }
+
+    private func describeScreen(_ screen: NSScreen?) -> String {
+        guard let screen else { return "nil" }
+        return "\(screen.localizedName) frame=\(formatRect(screen.frame)) visible=\(formatRect(screen.visibleFrame))"
+    }
+
+    private func describeWindow(_ window: NSWindow?) -> String {
+        guard let window else { return "nil" }
+        let visible = window.isVisible
+        let onActiveSpace = window.isOnActiveSpace
+        let occluded = window.occlusionState.contains(.visible) ? "visible" : "notVisible"
+        return "frame=\(formatRect(window.frame)) visible=\(visible) activeSpace=\(onActiveSpace) occlusion=\(occluded) level=\(window.level.rawValue) behavior=\(window.collectionBehavior.rawValue) screen=\(describeScreen(window.screen))"
+    }
+
+    private func logWindowState(_ reason: String) {
+        DebugLog.info("window[\(reason)] \(describeWindow(overlayWindow))", context: "OverlayWindowManager")
+    }
+
     private func setupAudioObservers() {
         // Only set up audio observers if microphone permission is already granted
         // This prevents triggering the permission dialog on app launch
@@ -328,10 +374,16 @@ class OverlayWindowManager: ObservableObject {
     private func createWindow() {
         DebugLog.info("Creating overlay window", context: "OverlayWindowManager")
 
-        guard let screen = NSScreen.main else {
-            DebugLog.info("ERROR: Could not get main screen", context: "OverlayWindowManager")
+        guard let screen = targetScreen() else {
+            DebugLog.info("ERROR: Could not get target screen", context: "OverlayWindowManager")
             return
         }
+        let screensSummary = NSScreen.screens.enumerated()
+            .map { index, currentScreen in
+                "[\(index)] \(describeScreen(currentScreen))"
+            }
+            .joined(separator: " | ")
+        DebugLog.info("createWindow target=\(describeScreen(screen)) screens=\(screensSummary)", context: "OverlayWindowManager")
 
         let screenFrame = screen.visibleFrame
         // Use idle size for initial window creation
@@ -347,18 +399,31 @@ class OverlayWindowManager: ObservableObject {
         // Create window using custom non-activating window class
         let window = NonActivatingWindow(
             contentRect: windowFrame,
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
 
-        // Configure window to float on top
-        window.level = NSWindow.Level.floating // Float above most windows
+        // Keep overlay visible above normal windows.
+        window.level = NSWindow.Level.screenSaver
         window.isOpaque = false
         window.backgroundColor = NSColor.clear
         window.hasShadow = false
         window.ignoresMouseEvents = false // Allow mouse events for hover and clicks
-        window.collectionBehavior = [NSWindow.CollectionBehavior.canJoinAllSpaces, NSWindow.CollectionBehavior.stationary, NSWindow.CollectionBehavior.ignoresCycle]
+        var collectionBehavior: NSWindow.CollectionBehavior = [
+            NSWindow.CollectionBehavior.canJoinAllSpaces,
+            NSWindow.CollectionBehavior.fullScreenAuxiliary,
+            NSWindow.CollectionBehavior.ignoresCycle
+        ]
+        if #available(macOS 13.0, *) {
+            // Required for overlay/panel windows that must follow other apps' fullscreen spaces.
+            collectionBehavior.insert(.canJoinAllApplications)
+        }
+        window.collectionBehavior = collectionBehavior
+        DebugLog.info(
+            "Configured collectionBehavior raw=\(window.collectionBehavior.rawValue) canJoinAllApplications=\(window.collectionBehavior.contains(.canJoinAllApplications))",
+            context: "OverlayWindowManager"
+        )
 
         // Prevent clicking from activating the app or bringing other windows forward
         window.hidesOnDeactivate = false
@@ -374,6 +439,7 @@ class OverlayWindowManager: ObservableObject {
 
         DebugLog.info("Created hosting view with manager observation", context: "OverlayWindowManager")
         DebugLog.info("Window created at position: (\(xPos), \(yPos)), level: \(window.level.rawValue)", context: "OverlayWindowManager")
+        logWindowState("createWindow-after")
     }
 
     private func setupScreenChangeObserver() {
@@ -383,8 +449,108 @@ class OverlayWindowManager: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             DebugLog.info("Screen configuration changed, repositioning overlay", context: "OverlayWindowManager")
+            self?.logWindowState("observer-screen-before")
             self?.repositionWindow()
+            self?.logWindowState("observer-screen-after")
         }
+    }
+
+    private func setupSpaceChangeObserver() {
+        spaceChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DebugLog.info("Active space changed, repositioning overlay", context: "OverlayWindowManager")
+            self?.logWindowState("observer-space-before")
+            self?.repositionWindow()
+            guard let self else { return }
+            if case .hidden = self.overlayState { return }
+            self.overlayWindow?.orderFrontRegardless()
+            self.ensureWindowOnActiveSpace(reason: "observer-space")
+            self.logWindowState("observer-space-after-orderFront")
+        }
+    }
+
+    private func setupAppActivationObserver() {
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            DebugLog.info("Frontmost app changed, repositioning overlay", context: "OverlayWindowManager")
+            self?.logWindowState("observer-activate-before")
+            self?.repositionWindow()
+            guard let self else { return }
+            if case .hidden = self.overlayState { return }
+            self.overlayWindow?.orderFrontRegardless()
+            self.ensureWindowOnActiveSpace(reason: "observer-activate")
+            self.logWindowState("observer-activate-after-orderFront")
+        }
+    }
+
+    private func screenForFrontmostApplication() -> NSScreen? {
+        guard let app = NSWorkspace.shared.frontmostApplication else {
+            DebugLog.info("screenForFrontmostApplication: no frontmost app", context: "OverlayWindowManager")
+            return nil
+        }
+
+        let pid = app.processIdentifier
+        guard let windowInfoList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            DebugLog.info("screenForFrontmostApplication: no window list", context: "OverlayWindowManager")
+            return nil
+        }
+
+        for info in windowInfoList {
+            guard let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, ownerPID == pid else {
+                continue
+            }
+
+            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            guard layer == 0 else { continue }
+
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
+            guard alpha > 0 else { continue }
+
+            guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let boundsRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
+                  boundsRect.width > 80,
+                  boundsRect.height > 80
+            else {
+                continue
+            }
+
+            let centerPoint = NSPoint(x: boundsRect.midX, y: boundsRect.midY)
+            if let screen = NSScreen.screens.first(where: { $0.frame.contains(centerPoint) }) {
+                DebugLog.info(
+                    "screenForFrontmostApplication selected pid=\(pid) app=\(app.localizedName ?? "unknown") bounds=\(Int(boundsRect.origin.x)),\(Int(boundsRect.origin.y)) \(Int(boundsRect.width))x\(Int(boundsRect.height)) screen=\(describeScreen(screen))",
+                    context: "OverlayWindowManager"
+                )
+                return screen
+            }
+        }
+
+        DebugLog.info("screenForFrontmostApplication: no matching screen for pid=\(pid) app=\(app.localizedName ?? "unknown")", context: "OverlayWindowManager")
+        return nil
+    }
+
+    private func targetScreen() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        let allScreens = NSScreen.screens.map { describeScreen($0) }.joined(separator: " | ")
+        DebugLog.info("targetScreen mouse=\(Int(mouseLocation.x)),\(Int(mouseLocation.y)) screens=\(allScreens)", context: "OverlayWindowManager")
+
+        if let frontmostScreen = screenForFrontmostApplication() {
+            DebugLog.info("targetScreen selected frontmost-app screen: \(describeScreen(frontmostScreen))", context: "OverlayWindowManager")
+            return frontmostScreen
+        }
+
+        if let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }) {
+            DebugLog.info("targetScreen selected mouse screen: \(describeScreen(mouseScreen))", context: "OverlayWindowManager")
+            return mouseScreen
+        }
+        let fallbackScreen = NSScreen.main ?? NSScreen.screens.first
+        DebugLog.info("targetScreen fallback selected: \(describeScreen(fallbackScreen))", context: "OverlayWindowManager")
+        return fallbackScreen
     }
 
     private func repositionWindow() {
@@ -392,7 +558,37 @@ class OverlayWindowManager: ObservableObject {
             DebugLog.info("Cannot reposition - window not available", context: "OverlayWindowManager")
             return
         }
+        logWindowState("reposition-before")
         updateWindowSizeForState(overlayState, animated: false)
+        ensureWindowOnActiveSpace(reason: "reposition")
+        logWindowState("reposition-after")
+    }
+
+    private func ensureWindowOnActiveSpace(reason: String) {
+        if case .hidden = overlayState { return }
+        if let window = overlayWindow,
+           !window.isOnActiveSpace,
+           !window.occlusionState.contains(.visible)
+        {
+            DebugLog.warning(
+                "ensureWindowOnActiveSpace[\(reason)]: window not on active space, recreating",
+                context: "OverlayWindowManager"
+            )
+
+            let currentState = overlayState
+            window.orderOut(nil)
+            window.close()
+            overlayWindow = nil
+
+            createWindow()
+            updateWindowSizeForState(currentState, animated: false)
+            if case .hidden = currentState {
+                overlayWindow?.orderOut(nil)
+            } else {
+                overlayWindow?.orderFrontRegardless()
+            }
+            logWindowState("ensureWindowOnActiveSpace-after-recreate")
+        }
     }
 
     private func calculatePosition(for position: OverlayPosition, screenFrame: NSRect, windowWidth: CGFloat, windowHeight: CGFloat) -> (x: CGFloat, y: CGFloat) {
@@ -413,6 +609,12 @@ class OverlayWindowManager: ObservableObject {
     deinit {
         if let observer = screenChangeObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = spaceChangeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        if let observer = appActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         overlayWindow?.close()
     }

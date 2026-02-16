@@ -12,7 +12,9 @@ import android.view.View
 import android.view.animation.OvershootInterpolator
 import com.whispermate.aidictation.R
 import kotlin.math.PI
+import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 import kotlin.math.sin
 
 /**
@@ -181,7 +183,10 @@ class CircularMicButtonView @JvmOverloads constructor(
                         0f // Dot size (will be scaled in onDraw)
                     } else {
                         val bandValue = frequencyBands?.getOrNull(i)?.coerceIn(0f, 1f) ?: audioLevel
-                        bandValue * FROZEN_HEIGHTS[i]
+                        val boosted = (bandValue * 1.35f + audioLevel * 0.22f).coerceIn(0f, 1f)
+                        val eased = sqrt(boosted)
+                        val floor = if (audioLevel > 0.08f) 0.12f else 0f
+                        max(eased, floor) * FROZEN_HEIGHTS[i]
                     }
                 }
                 State.Processing -> {
@@ -199,7 +204,7 @@ class CircularMicButtonView @JvmOverloads constructor(
     private fun animateBarTo(index: Int, targetHeight: Float) {
         barAnimators[index]?.cancel()
         barAnimators[index] = ValueAnimator.ofFloat(barHeights[index], targetHeight).apply {
-            duration = 350
+            duration = 170
             interpolator = springInterpolator
             addUpdateListener { animator ->
                 barHeights[index] = animator.animatedValue as Float

@@ -81,10 +81,25 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         Processing
     }
 
+    private enum class RecordingMode {
+        Dictation,
+        RewriteInstruction
+    }
+
+    private enum class CommandAction {
+        FixGrammar,
+        RewriteWithAi
+    }
+
     private data class EditableTextSnapshot(
         val text: String,
         val selectionStart: Int,
         val selectionEnd: Int
+    )
+
+    private data class SelectionCommandTarget(
+        val selectedText: String,
+        val contextBefore: String
     )
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -102,10 +117,27 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
     private var isCommandActionsAttached = false
 
     private var recordingState: RecordingState = RecordingState.Idle
+    private var recordingMode: RecordingMode = RecordingMode.Dictation
     private var audioRecorder: AudioRecorder? = null
     private var vadJob: Job? = null
     private var focusLossJob: Job? = null
     private var bubbleAnimationJob: Job? = null
+
+    private var activeCommandAction: CommandAction? = null
+    private var pendingRewriteTarget: SelectionCommandTarget? = null
+    private var fixGrammarButton: TextView? = null
+    private var rewriteButton: TextView? = null
+
+    private var bubbleIdleColor: Int = 0xFF2196F3.toInt()
+    private var bubbleDictationActiveColor: Int = 0xFFFF9500.toInt()
+    private var bubbleRewriteActiveColor: Int = 0xFF4F46E5.toInt()
+    private var bubbleFixActiveColor: Int = 0xFF0D9488.toInt()
+    private var commandChipIdleTextColor: Int = Color.WHITE
+    private var commandChipIdleBackgroundColor: Int = 0x24FFFFFF
+    private var commandChipFixTextColor: Int = Color.WHITE
+    private var commandChipFixBackgroundColor: Int = 0xFF0D9488.toInt()
+    private var commandChipRewriteTextColor: Int = Color.WHITE
+    private var commandChipRewriteBackgroundColor: Int = 0xFF4F46E5.toInt()
 
     private var lastFocusedPackage: String? = null
     private var lastDictatedText: String = ""
@@ -288,19 +320,24 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         if (bubbleView != null) return
 
         val size = dp(BUBBLE_SIZE_DP)
-        val themedIdleColor = resolveThemeColor(
+        bubbleIdleColor = resolveThemeColor(
             android.R.attr.colorPrimary,
             0xFF2196F3.toInt()
         )
-        val themedActiveColor = resolveThemeColor(
+        bubbleDictationActiveColor = resolveThemeColor(
             android.R.attr.colorSecondary,
             0xFFFF9500.toInt()
         )
+        bubbleRewriteActiveColor = resolveThemeColor(
+            android.R.attr.colorAccent,
+            0xFF4F46E5.toInt()
+        )
+        bubbleFixActiveColor = bubbleDictationActiveColor
 
         bubbleView = CircularMicButtonView(this).apply {
             elevation = dp(8).toFloat()
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            setColors(themedIdleColor, themedActiveColor)
+            setColors(bubbleIdleColor, resolveBubbleActiveColor())
             setState(CircularMicButtonView.State.Idle)
         }
 
@@ -335,19 +372,35 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         )
         val onSurfaceColor = resolveThemeColor(android.R.attr.textColorPrimary, Color.WHITE)
         val containerColor = withAlpha(surfaceColor, 0.92f)
-        val chipColor = withAlpha(onSurfaceColor, 0.14f)
+        commandChipIdleTextColor = onSurfaceColor
+        commandChipIdleBackgroundColor = withAlpha(onSurfaceColor, 0.14f)
 
-        val fixGrammarButton = createCommandActionButton(
-            label = getString(R.string.overlay_action_fix_grammar),
-            textColor = onSurfaceColor,
-            backgroundColor = chipColor,
-            onClick = { executeSelectionCommand(COMMAND_CLEANUP_ID) }
+        val fixAccent = resolveThemeColor(
+            android.R.attr.colorSecondary,
+            0xFF0D9488.toInt()
         )
-        val rewriteButton = createCommandActionButton(
+        val rewriteAccent = resolveThemeColor(
+            android.R.attr.colorAccent,
+            0xFF4F46E5.toInt()
+        )
+        commandChipFixBackgroundColor = withAlpha(fixAccent, 0.9f)
+        commandChipFixTextColor = preferredOnColor(commandChipFixBackgroundColor)
+        commandChipRewriteBackgroundColor = withAlpha(rewriteAccent, 0.9f)
+        commandChipRewriteTextColor = preferredOnColor(commandChipRewriteBackgroundColor)
+        bubbleFixActiveColor = fixAccent
+        bubbleRewriteActiveColor = rewriteAccent
+
+        fixGrammarButton = createCommandActionButton(
+            label = getString(R.string.overlay_action_fix_grammar),
+            textColor = commandChipIdleTextColor,
+            backgroundColor = commandChipIdleBackgroundColor,
+            onClick = { executeSelectionCommand(COMMAND_CLEANUP_ID, CommandAction.FixGrammar) }
+        )
+        rewriteButton = createCommandActionButton(
             label = getString(R.string.overlay_action_rewrite_ai),
-            textColor = onSurfaceColor,
-            backgroundColor = chipColor,
-            onClick = { executeSelectionCommand(COMMAND_REWRITE_ID) }
+            textColor = commandChipIdleTextColor,
+            backgroundColor = commandChipIdleBackgroundColor,
+            onClick = { startRewriteInstructionRecording() }
         )
 
         commandActionsView = LinearLayout(this).apply {
@@ -383,6 +436,9 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
             x = defaultBubbleX()
             y = defaultBubbleY()
         }
+
+        updateCommandActionButtons()
+        updateBubbleUi()
     }
 
     private fun createCommandActionButton(
@@ -409,8 +465,18 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
     }
 
     private fun updateCommandActionsVisibility(source: AccessibilityNodeInfo?) {
-        if (!isBubbleAttached || recordingState != RecordingState.Idle) {
+        if (!isBubbleAttached) {
             hideCommandActions(animated = true)
+            return
+        }
+
+        if (recordingState != RecordingState.Idle) {
+            if (activeCommandAction != null) {
+                showCommandActions()
+            } else {
+                hideCommandActions(animated = true)
+            }
+            updateCommandActionButtons()
             return
         }
 
@@ -429,6 +495,7 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         } else {
             hideCommandActions(animated = true)
         }
+        updateCommandActionButtons()
     }
 
     private fun showCommandActions() {
@@ -441,6 +508,7 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         if (isCommandActionsAttached) {
             actions.alpha = 1f
             updateCommandActionsPosition()
+            updateCommandActionButtons()
             return
         }
 
@@ -449,6 +517,7 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
             windowManager.addView(actions, params)
             isCommandActionsAttached = true
             updateCommandActionsPosition()
+            updateCommandActionButtons()
             actions.animate()
                 .alpha(1f)
                 .setDuration(BUBBLE_ANIMATION_MS)
@@ -572,7 +641,7 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
 
     private fun onBubbleTapped() {
         when (recordingState) {
-            RecordingState.Idle -> startRecording()
+            RecordingState.Idle -> startRecording(mode = RecordingMode.Dictation)
             RecordingState.Recording -> stopRecording(discard = false)
             RecordingState.Processing -> Unit
         }
@@ -598,33 +667,20 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
             .apply()
     }
 
-    private fun executeSelectionCommand(commandId: String) {
+    private fun executeSelectionCommand(commandId: String, action: CommandAction) {
         if (recordingState != RecordingState.Idle) return
 
-        val node = resolveFocusedEditableNode(null)
-        if (node == null) {
+        val target = resolveSelectionCommandTarget()
+        if (target == null) {
             hideCommandActions(animated = true)
             return
         }
 
-        val snapshot = captureEditableTextSnapshot(node)
-        node.recycle()
-
-        if (snapshot.selectionEnd <= snapshot.selectionStart) {
-            hideCommandActions(animated = true)
-            return
-        }
-
-        val targetText = snapshot.text.substring(snapshot.selectionStart, snapshot.selectionEnd)
-        if (targetText.isBlank()) {
-            hideCommandActions(animated = true)
-            return
-        }
-
-        val context = snapshot.text.take(snapshot.selectionStart).takeLast(200)
-        hideCommandActions(animated = true)
+        activeCommandAction = action
+        recordingMode = RecordingMode.Dictation
         recordingState = RecordingState.Processing
         updateBubbleUi()
+        showCommandActions()
 
         serviceScope.launch {
             try {
@@ -639,10 +695,15 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
                 }
 
                 val contextRules = appPreferences.getInstructionsForApp(lastFocusedPackage)
-                val result = CommandClient.execute(command, targetText, context, contextRules)
+                val result = CommandClient.execute(
+                    command = command,
+                    targetText = target.selectedText,
+                    context = target.contextBefore,
+                    additionalInstructions = contextRules
+                )
                 result.onSuccess { transformed ->
                     if (transformed.isBlank()) return@onSuccess
-                    val applied = replaceCurrentSelection(transformed)
+                    val applied = replaceSelectionOrMatchedText(target.selectedText, transformed)
                     if (!applied) {
                         Toast.makeText(
                             this@OverlayDictationAccessibilityService,
@@ -662,6 +723,7 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
                 }
             } finally {
                 recordingState = RecordingState.Idle
+                activeCommandAction = null
                 updateBubbleUi()
                 refreshOverlayVisibility(null)
             }
@@ -671,6 +733,29 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
     private suspend fun resolveCommand(commandId: String): Command? {
         return appPreferences.getEnabledCommands().find { it.id == commandId }
             ?: AppPreferences.defaultCommands.find { it.id == commandId }
+    }
+
+    private fun resolveSelectionCommandTarget(): SelectionCommandTarget? {
+        val node = resolveFocusedEditableNode(null) ?: return null
+        try {
+            val snapshot = captureEditableTextSnapshot(node)
+            if (snapshot.selectionEnd <= snapshot.selectionStart) {
+                return null
+            }
+
+            val selectedText = snapshot.text.substring(snapshot.selectionStart, snapshot.selectionEnd)
+            if (selectedText.isBlank()) {
+                return null
+            }
+
+            val contextBefore = snapshot.text.take(snapshot.selectionStart).takeLast(200)
+            return SelectionCommandTarget(
+                selectedText = selectedText,
+                contextBefore = contextBefore
+            )
+        } finally {
+            node.recycle()
+        }
     }
 
     private fun replaceCurrentSelection(replacement: String): Boolean {
@@ -686,21 +771,89 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startRecording() {
+    private fun replaceSelectionOrMatchedText(
+        targetText: String,
+        replacement: String
+    ): Boolean {
+        val node = resolveFocusedEditableNode(null) ?: return false
+        try {
+            val snapshot = captureEditableTextSnapshot(node)
+            val selStart = snapshot.selectionStart
+            val selEnd = snapshot.selectionEnd
+            if (selEnd > selStart) {
+                return replaceRange(node, snapshot.text, selStart, selEnd, replacement)
+            }
+
+            val matchStart = snapshot.text.lastIndexOf(targetText)
+            if (matchStart >= 0) {
+                return replaceRange(
+                    node = node,
+                    currentText = snapshot.text,
+                    start = matchStart,
+                    end = matchStart + targetText.length,
+                    replacement = replacement
+                )
+            }
+
+            return false
+        } finally {
+            node.recycle()
+        }
+    }
+
+    private fun startRewriteInstructionRecording() {
         if (recordingState != RecordingState.Idle) return
 
-        hideCommandActions(animated = true)
+        val target = resolveSelectionCommandTarget()
+        if (target == null) {
+            hideCommandActions(animated = true)
+            return
+        }
+
+        pendingRewriteTarget = target
+        activeCommandAction = CommandAction.RewriteWithAi
+        startRecording(mode = RecordingMode.RewriteInstruction)
+    }
+
+    private fun startRecording(mode: RecordingMode) {
+        if (recordingState != RecordingState.Idle) return
+
+        if (mode == RecordingMode.Dictation) {
+            pendingRewriteTarget = null
+            activeCommandAction = null
+            hideCommandActions(animated = true)
+        } else {
+            showCommandActions()
+            updateCommandActionButtons()
+        }
 
         val focusedNode = resolveFocusedEditableNode(null)
         if (focusedNode == null) {
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+                updateBubbleUi()
+            }
             Toast.makeText(this, "Focus a text field first", Toast.LENGTH_SHORT).show()
             return
         }
         focusedNode.recycle()
 
+        if (mode == RecordingMode.RewriteInstruction && pendingRewriteTarget == null) {
+            activeCommandAction = null
+            Toast.makeText(this, R.string.overlay_command_apply_failed, Toast.LENGTH_SHORT).show()
+            updateBubbleUi()
+            return
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+                updateBubbleUi()
+            }
             Toast.makeText(this, "Microphone permission is required", Toast.LENGTH_SHORT).show()
             return
         }
@@ -708,12 +861,18 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         val recorder = AudioRecorder(this, enableVAD = true)
         val file = recorder.start()
         if (file == null) {
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+                updateBubbleUi()
+            }
             Toast.makeText(this, "Could not start recording", Toast.LENGTH_SHORT).show()
             recorder.release()
             return
         }
 
         audioRecorder = recorder
+        recordingMode = mode
         recordingState = RecordingState.Recording
         updateBubbleUi()
 
@@ -729,12 +888,18 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
 
     private fun stopRecording(discard: Boolean) {
         if (recordingState != RecordingState.Recording) return
+        val mode = recordingMode
 
         vadJob?.cancel()
         vadJob = null
 
         val recorder = audioRecorder ?: run {
             recordingState = RecordingState.Idle
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+            }
+            recordingMode = RecordingMode.Dictation
             updateBubbleUi()
             return
         }
@@ -748,12 +913,22 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         if (discard) {
             audioFile?.delete()
             recordingState = RecordingState.Idle
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+            }
+            recordingMode = RecordingMode.Dictation
             updateBubbleUi()
             return
         }
 
         if (audioFile == null || !audioFile.exists()) {
             recordingState = RecordingState.Idle
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+            }
+            recordingMode = RecordingMode.Dictation
             updateBubbleUi()
             return
         }
@@ -761,6 +936,12 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         if (duration < MIN_RECORDING_MS || !speechDetected) {
             audioFile.delete()
             recordingState = RecordingState.Idle
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+                Toast.makeText(this, R.string.overlay_command_no_instruction, Toast.LENGTH_SHORT).show()
+            }
+            recordingMode = RecordingMode.Dictation
             updateBubbleUi()
             return
         }
@@ -769,6 +950,11 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         if (focusedNode == null) {
             audioFile.delete()
             recordingState = RecordingState.Idle
+            if (mode == RecordingMode.RewriteInstruction) {
+                activeCommandAction = null
+                pendingRewriteTarget = null
+            }
+            recordingMode = RecordingMode.Dictation
             updateBubbleUi()
             return
         }
@@ -779,10 +965,21 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
 
         serviceScope.launch {
             try {
-                processRecording(audioFile)
+                when (mode) {
+                    RecordingMode.Dictation -> processRecording(audioFile)
+                    RecordingMode.RewriteInstruction -> processRewriteInstructionRecording(
+                        audioFile = audioFile,
+                        target = pendingRewriteTarget
+                    )
+                }
             } finally {
                 audioFile.delete()
                 recordingState = RecordingState.Idle
+                if (mode == RecordingMode.RewriteInstruction) {
+                    activeCommandAction = null
+                    pendingRewriteTarget = null
+                }
+                recordingMode = RecordingMode.Dictation
                 updateBubbleUi()
                 refreshOverlayVisibility(null)
             }
@@ -832,6 +1029,72 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         }.onFailure { error ->
             Log.e(TAG, "Transcription failed", error)
             Toast.makeText(this@OverlayDictationAccessibilityService, "Transcription failed", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private suspend fun processRewriteInstructionRecording(
+        audioFile: java.io.File,
+        target: SelectionCommandTarget?
+    ) {
+        if (target == null) {
+            Toast.makeText(
+                this@OverlayDictationAccessibilityService,
+                R.string.overlay_command_apply_failed,
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        val transcriptionResult = TranscriptionClient.transcribe(audioFile = audioFile, prompt = null)
+        transcriptionResult.onSuccess { instruction ->
+            if (instruction.isBlank()) {
+                Toast.makeText(
+                    this@OverlayDictationAccessibilityService,
+                    R.string.overlay_command_no_instruction,
+                    Toast.LENGTH_SHORT
+                ).show()
+                return@onSuccess
+            }
+
+            val contextRules = appPreferences.getInstructionsForApp(lastFocusedPackage)
+            val commandResult = CommandClient.executeInstruction(
+                instruction = instruction,
+                targetText = target.selectedText,
+                context = target.contextBefore,
+                additionalInstructions = contextRules
+            )
+
+            commandResult.onSuccess { transformed ->
+                if (transformed.isBlank()) return@onSuccess
+
+                val applied = replaceSelectionOrMatchedText(
+                    targetText = target.selectedText,
+                    replacement = transformed
+                )
+                if (!applied) {
+                    Toast.makeText(
+                        this@OverlayDictationAccessibilityService,
+                        R.string.overlay_command_apply_failed,
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    lastDictatedText = transformed
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Rewrite instruction failed", error)
+                Toast.makeText(
+                    this@OverlayDictationAccessibilityService,
+                    getString(R.string.overlay_command_failed, getString(R.string.overlay_action_rewrite_ai)),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }.onFailure { error ->
+            Log.e(TAG, "Instruction transcription failed", error)
+            Toast.makeText(
+                this@OverlayDictationAccessibilityService,
+                "Transcription failed",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
@@ -1023,8 +1286,68 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         val removedPrefix: Int
     )
 
+    private fun resolveBubbleActiveColor(): Int {
+        return when (activeCommandAction) {
+            CommandAction.FixGrammar -> bubbleFixActiveColor
+            CommandAction.RewriteWithAi -> bubbleRewriteActiveColor
+            null -> bubbleDictationActiveColor
+        }
+    }
+
+    private fun updateCommandActionButtons() {
+        val hasActiveCommand = activeCommandAction != null
+        val isBusy = recordingState != RecordingState.Idle
+        val canTap = recordingState == RecordingState.Idle
+
+        val fixActive = hasActiveCommand && activeCommandAction == CommandAction.FixGrammar
+        val rewriteActive = hasActiveCommand && activeCommandAction == CommandAction.RewriteWithAi
+
+        applyCommandButtonStyle(
+            button = fixGrammarButton,
+            textColor = if (fixActive) commandChipFixTextColor else commandChipIdleTextColor,
+            backgroundColor = if (fixActive) commandChipFixBackgroundColor else commandChipIdleBackgroundColor,
+            enabled = canTap,
+            subdued = isBusy && !fixActive
+        )
+        applyCommandButtonStyle(
+            button = rewriteButton,
+            textColor = if (rewriteActive) commandChipRewriteTextColor else commandChipIdleTextColor,
+            backgroundColor = if (rewriteActive) commandChipRewriteBackgroundColor else commandChipIdleBackgroundColor,
+            enabled = canTap,
+            subdued = isBusy && !rewriteActive
+        )
+    }
+
+    private fun applyCommandButtonStyle(
+        button: TextView?,
+        textColor: Int,
+        backgroundColor: Int,
+        enabled: Boolean,
+        subdued: Boolean
+    ) {
+        button ?: return
+        button.isEnabled = enabled
+        button.alpha = if (subdued) 0.55f else 1f
+        button.setTextColor(textColor)
+        button.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(16).toFloat()
+            setColor(backgroundColor)
+        }
+    }
+
+    private fun preferredOnColor(backgroundColor: Int): Int {
+        val red = Color.red(backgroundColor) / 255f
+        val green = Color.green(backgroundColor) / 255f
+        val blue = Color.blue(backgroundColor) / 255f
+        val luma = (0.299f * red) + (0.587f * green) + (0.114f * blue)
+        return if (luma > 0.62f) Color.BLACK else Color.WHITE
+    }
+
     private fun updateBubbleUi() {
+        updateCommandActionButtons()
         val bubble = bubbleView ?: return
+        bubble.setColors(bubbleIdleColor, resolveBubbleActiveColor())
 
         when (recordingState) {
             RecordingState.Idle -> {
