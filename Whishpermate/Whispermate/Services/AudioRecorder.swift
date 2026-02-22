@@ -18,6 +18,9 @@ class AudioRecorder: NSObject, ObservableObject {
     private let frequencyAnalyzer = FrequencyAnalyzer()
     private var inputFormat: AVAudioFormat?
     private var outputFormat: AVAudioFormat?
+    private var pendingEngineRefresh = false
+    private var refreshWorkItem: DispatchWorkItem?
+    private var retiredEngines: [AVAudioEngine] = []
 
     override private init() {
         super.init()
@@ -43,10 +46,38 @@ class AudioRecorder: NSObject, ObservableObject {
         // Don't restart if currently recording - let the current recording finish
         // Only reinitialize the engine when not recording
         if !isRecording {
-            DebugLog.info("Reinitializing engine with new device", context: "AudioRecorder LOG")
-            setupAudioEngine()
+            pendingEngineRefresh = true
+            scheduleEngineRefresh()
         } else {
             DebugLog.info("Currently recording - will use new device on next recording", context: "AudioRecorder LOG")
+        }
+    }
+
+    private func scheduleEngineRefresh() {
+        refreshWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            guard self.pendingEngineRefresh, !self.isRecording else { return }
+
+            DebugLog.info("Reinitializing engine with new device", context: "AudioRecorder LOG")
+            self.pendingEngineRefresh = false
+            self.setupAudioEngine()
+        }
+
+        refreshWorkItem = workItem
+
+        // Audio route changes often arrive in bursts; debounce to avoid tearing down the engine
+        // while AVAudioIOUnit is still dispatching internal callbacks.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+    }
+
+    private func retireEngine(_ engine: AVAudioEngine) {
+        retiredEngines.append(engine)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self else { return }
+            self.retiredEngines.removeAll { $0 === engine }
         }
     }
 
@@ -60,6 +91,7 @@ class AudioRecorder: NSObject, ObservableObject {
             }
             engine.inputNode.removeTap(onBus: 0)
             audioEngine = nil
+            retireEngine(engine)
         }
 
         do {
@@ -145,6 +177,13 @@ class AudioRecorder: NSObject, ObservableObject {
 
     func startRecording() {
         DebugLog.info("⚡ startRecording called - isRecording before: \(isRecording)", context: "AudioRecorder LOG")
+
+        if pendingEngineRefresh {
+            DebugLog.info("Applying deferred audio engine refresh before recording", context: "AudioRecorder LOG")
+            pendingEngineRefresh = false
+            refreshWorkItem?.cancel()
+            setupAudioEngine()
+        }
 
         // Ensure engine is set up
         if audioEngine == nil {
@@ -291,6 +330,8 @@ class AudioRecorder: NSObject, ObservableObject {
 
     deinit {
         DebugLog.info("🗑️ Deinit - cleaning up", context: "AudioRecorder LOG")
+
+        refreshWorkItem?.cancel()
 
         // Remove notification observers
         NotificationCenter.default.removeObserver(self)
