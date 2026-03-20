@@ -1185,6 +1185,11 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
             return true
         }
 
+        if (currentText.isEmpty()) {
+            val rawLen = node.text?.length ?: 0
+            if (rawLen > 0) setNodeSelection(node, 0, rawLen)
+        }
+
         return pasteFallback(node, replacement, safeStart, safeEnd)
     }
 
@@ -1268,9 +1273,19 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
         if (rawText.isEmpty()) return NormalizedText("", 0)
         if (node.isShowingHintText) return NormalizedText("", rawText.length)
 
+        // if both selection endpoints are -1, the field has no cursor position,
+        // which means it's likely showing placeholder text. Apps like Telegram don't set
+        // isShowingHintText=true or hintText when displaying their placeholder.
+        if (node.textSelectionStart == -1 && node.textSelectionEnd == -1) {
+            return NormalizedText("", rawText.length)
+        }
+
         val hint = node.hintText?.toString()?.trim().orEmpty()
         if (hint.isNotEmpty()) {
-            if (rawText.equals(hint, ignoreCase = true)) {
+            val hintNfc = java.text.Normalizer.normalize(hint, java.text.Normalizer.Form.NFC)
+            val rawNfc = java.text.Normalizer.normalize(rawText.trim(), java.text.Normalizer.Form.NFC)
+
+            if (rawNfc.equals(hintNfc, ignoreCase = true)) {
                 return NormalizedText("", rawText.length)
             }
 
