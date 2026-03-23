@@ -63,7 +63,8 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    onNavigateToTranscriptionSettings: () -> Unit,
+    onNavigateToPostProcessingSettings: () -> Unit,
+    onNavigateToLanguageSettings: () -> Unit,
     onNavigateToRecordingDetail: (String) -> Unit,
     shouldStartRecording: Boolean = false,
     onRecordingStarted: () -> Unit = {},
@@ -73,6 +74,8 @@ fun MainScreen(
     val recordings by viewModel.recordings.collectAsState()
     val recordingState by viewModel.recordingState.collectAsState()
     val error by viewModel.error.collectAsState()
+    val multilingualEnabled by viewModel.multilingualEnabled.collectAsState()
+    val postProcessingEnabled by viewModel.postProcessingEnabled.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -208,7 +211,12 @@ fun MainScreen(
             1 -> SettingsScreen(
                 recordings = recordings,
                 onClearHistory = { viewModel.clearAllHistory() },
-                onNavigateToTranscriptionSettings = onNavigateToTranscriptionSettings,
+                onNavigateToPostProcessingSettings = onNavigateToPostProcessingSettings,
+                onNavigateToLanguageSettings = onNavigateToLanguageSettings,
+                multilingualEnabled = multilingualEnabled,
+                onMultilingualToggled = { viewModel.setMultilingualEnabled(it) },
+                postProcessingEnabled = postProcessingEnabled,
+                onPostProcessingToggled = { viewModel.setPostProcessingEnabled(it) },
                 modifier = Modifier.padding(paddingValues)
             )
         }
