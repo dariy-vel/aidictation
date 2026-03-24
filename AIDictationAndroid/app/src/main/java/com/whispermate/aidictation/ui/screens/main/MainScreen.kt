@@ -83,9 +83,6 @@ fun MainScreen(
 
     // Audio recorder state
     var audioRecorder by remember { mutableStateOf<AudioRecorder?>(null) }
-    val audioLevel = audioRecorder?.audioLevel?.collectAsState()?.value ?: 0f
-    val frequencyBands = audioRecorder?.frequencyBands?.collectAsState()?.value
-    val shouldAutoStop = audioRecorder?.shouldAutoStop?.collectAsState()?.value ?: false
 
     // Show error in snackbar
     LaunchedEffect(error) {
@@ -126,17 +123,6 @@ fun MainScreen(
         }
     }
 
-    // Auto-stop when VAD detects silence after speech
-    LaunchedEffect(shouldAutoStop) {
-        if (shouldAutoStop && recordingState == RecordingState.Recording) {
-            val result = audioRecorder?.stop()
-            val file = result?.first
-            val duration = result?.second ?: 0L
-            audioRecorder = null
-            viewModel.stopRecording(file, duration)
-        }
-    }
-
     // Cleanup audio recorder
     DisposableEffect(Unit) {
         onDispose {
@@ -163,41 +149,39 @@ fun MainScreen(
             }
         },
         floatingActionButton = {
-            CircularMicButton(
-                state = when (recordingState) {
-                    RecordingState.Idle -> MicButtonState.Idle
-                    RecordingState.Recording -> MicButtonState.Recording
-                    RecordingState.Processing -> MicButtonState.Processing
-                },
-                audioLevel = audioLevel,
-                frequencyBands = frequencyBands,
-                onClick = {
-                    when (recordingState) {
-                        RecordingState.Idle -> {
-                            val recorder = AudioRecorder(context)
-                            audioRecorder = recorder
-                            val file = recorder.start()
-                            if (file != null) {
-                                viewModel.startRecording()
-                            } else {
-                                audioRecorder = null
-                            }
-                        }
-                        RecordingState.Recording -> {
-                            scope.launch {
-                                val result = audioRecorder?.stop()
-                                val file = result?.first
-                                val duration = result?.second ?: 0L
-                                audioRecorder = null
-                                viewModel.stopRecording(file, duration)
-                            }
-                        }
-                        RecordingState.Processing -> {
-                            // Do nothing while processing
-                        }
+            // Isolated composable: state flow collection happens here so only the FAB
+            // recomposes at the audio-level polling rate (50ms), not the whole screen.
+            RecordingFab(
+                recorder = audioRecorder,
+                recordingState = recordingState,
+                onStartRecording = {
+                    val recorder = AudioRecorder(context)
+                    audioRecorder = recorder
+                    val file = recorder.start()
+                    if (file != null) {
+                        viewModel.startRecording()
+                    } else {
+                        audioRecorder = null
                     }
                 },
-                size = 64.dp
+                onStopRecording = {
+                    scope.launch {
+                        val result = audioRecorder?.stop()
+                        val file = result?.first
+                        val duration = result?.second ?: 0L
+                        audioRecorder = null
+                        viewModel.stopRecording(file, duration)
+                    }
+                },
+                onAutoStop = {
+                    scope.launch {
+                        val result = audioRecorder?.stop()
+                        val file = result?.first
+                        val duration = result?.second ?: 0L
+                        audioRecorder = null
+                        viewModel.stopRecording(file, duration)
+                    }
+                }
             )
         }
     ) { paddingValues ->
@@ -364,6 +348,45 @@ private fun RecordingItem(
             }
         }
     }
+}
+
+@Composable
+private fun RecordingFab(
+    recorder: AudioRecorder?,
+    recordingState: RecordingState,
+    onStartRecording: () -> Unit,
+    onStopRecording: () -> Unit,
+    onAutoStop: () -> Unit
+) {
+    // Collect audio state only when a recorder is active — isolates high-frequency
+    // recompositions (50ms audio level updates) to this composable alone.
+    val audioLevel = recorder?.audioLevel?.collectAsState()?.value ?: 0f
+    val frequencyBands = recorder?.frequencyBands?.collectAsState()?.value
+    val shouldAutoStop = recorder?.shouldAutoStop?.collectAsState()?.value ?: false
+
+    LaunchedEffect(shouldAutoStop) {
+        if (shouldAutoStop && recordingState == RecordingState.Recording) {
+            onAutoStop()
+        }
+    }
+
+    CircularMicButton(
+        state = when (recordingState) {
+            RecordingState.Idle -> MicButtonState.Idle
+            RecordingState.Recording -> MicButtonState.Recording
+            RecordingState.Processing -> MicButtonState.Processing
+        },
+        audioLevel = audioLevel,
+        frequencyBands = frequencyBands,
+        onClick = {
+            when (recordingState) {
+                RecordingState.Idle -> onStartRecording()
+                RecordingState.Recording -> onStopRecording()
+                RecordingState.Processing -> { /* Do nothing while processing */ }
+            }
+        },
+        size = 64.dp
+    )
 }
 
 private fun copyToClipboard(context: Context, text: String) {

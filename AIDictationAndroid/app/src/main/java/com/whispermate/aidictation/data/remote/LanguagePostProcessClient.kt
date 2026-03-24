@@ -2,6 +2,8 @@ package com.whispermate.aidictation.data.remote
 
 import android.util.Log
 import com.whispermate.aidictation.BuildConfig
+import com.whispermate.aidictation.data.preferences.ApiConfigManager
+import com.whispermate.aidictation.data.preferences.ApiProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,7 +24,7 @@ object LanguagePostProcessClient {
     private const val TAG = "LanguagePostProcessClient"
 
     private val okHttpClient by lazy {
-        OkHttpClient.Builder()
+        SharedHttpClient.instance.newBuilder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
@@ -49,9 +51,12 @@ object LanguagePostProcessClient {
     ): String = withContext(Dispatchers.IO) {
         if (candidates.isEmpty()) return@withContext ""
 
-        val apiKey = BuildConfig.GROQ_API_KEY
+        val config = ApiConfigManager.instance?.getPostProcessingConfig()
+        val apiKey = config?.apiKey ?: BuildConfig.GROQ_API_KEY
+        val endpoint = config?.endpoint ?: ApiProvider.GROQ.llmEndpoint()
+        val model = config?.model ?: ApiProvider.GROQ.defaultLlmModel()
         if (apiKey.isEmpty()) {
-            Log.w(TAG, "Groq API key not configured, returning best candidate")
+            Log.w(TAG, "Post-processing API key not configured, returning best candidate")
             return@withContext bestCandidate(candidates)
         }
 
@@ -88,7 +93,7 @@ object LanguagePostProcessClient {
 
         try {
             val requestJson = JSONObject().apply {
-                put("model", BuildConfig.GROQ_MODEL)
+                put("model", model)
                 put("messages", JSONArray().apply {
                     put(JSONObject().apply {
                         put("role", "system")
@@ -104,8 +109,8 @@ object LanguagePostProcessClient {
             }
 
             val request = Request.Builder()
-                .url(BuildConfig.GROQ_ENDPOINT)
-                .addHeader("Authorization", "Bearer $apiKey")
+                .url(endpoint)
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .addHeader("Content-Type", "application/json")
                 .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()

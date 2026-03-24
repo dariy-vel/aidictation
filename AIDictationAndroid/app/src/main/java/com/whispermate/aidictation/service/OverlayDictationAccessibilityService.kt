@@ -36,6 +36,7 @@ import com.whispermate.aidictation.data.remote.TranscriptionClient
 import com.whispermate.aidictation.domain.model.Command
 import com.whispermate.aidictation.ui.views.CircularMicButtonView
 import com.whispermate.aidictation.util.AudioRecorder
+import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -150,6 +151,7 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
 
     private var lastFocusedPackage: String? = null
     private var lastDictatedText: String = ""
+    private var lastHighFrequencyEventTime = 0L
 
     private val bubblePrefs by lazy { getSharedPreferences(BUBBLE_PREFS, Context.MODE_PRIVATE) }
 
@@ -176,6 +178,16 @@ class OverlayDictationAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         if (event.eventType !in TRACKED_EVENT_TYPES) return
+
+        // Debounce high-frequency events (content/text/selection changes) to avoid
+        // expensive window traversals on every keystroke or content update.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastHighFrequencyEventTime < 150L) return
+            lastHighFrequencyEventTime = now
+        }
 
         lastFocusedPackage = event.packageName?.toString()
         refreshOverlayVisibility(event.source)

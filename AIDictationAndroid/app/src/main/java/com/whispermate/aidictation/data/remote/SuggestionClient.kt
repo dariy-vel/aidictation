@@ -3,6 +3,7 @@ package com.whispermate.aidictation.data.remote
 import android.util.Log
 import com.whispermate.aidictation.BuildConfig
 import com.whispermate.aidictation.data.preferences.ApiConfigManager
+import com.whispermate.aidictation.data.preferences.ApiProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -17,7 +18,7 @@ object SuggestionClient {
     private const val TAG = "SuggestionClient"
 
     private val okHttpClient by lazy {
-        OkHttpClient.Builder()
+        SharedHttpClient.instance.newBuilder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .writeTimeout(5, TimeUnit.SECONDS)
@@ -36,8 +37,8 @@ Output: you, your, ya"""
         try {
             val config = ApiConfigManager.instance?.getPostProcessingConfig()
             val apiKey = config?.apiKey ?: BuildConfig.GROQ_API_KEY
-            val endpoint = config?.endpoint ?: BuildConfig.GROQ_ENDPOINT
-            val model = config?.model ?: BuildConfig.GROQ_MODEL
+            val endpoint = config?.endpoint ?: ApiProvider.GROQ.llmEndpoint()
+            val model = config?.model ?: ApiProvider.GROQ.defaultLlmModel()
             if (apiKey.isEmpty()) {
                 return@withContext Result.failure(Exception("Post-processing API key not configured"))
             }
@@ -66,7 +67,7 @@ Output: you, your, ya"""
 
             val request = Request.Builder()
                 .url(endpoint)
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .addHeader("Content-Type", "application/json")
                 .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()

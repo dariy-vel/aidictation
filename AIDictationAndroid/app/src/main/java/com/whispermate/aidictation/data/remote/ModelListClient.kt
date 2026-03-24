@@ -15,7 +15,7 @@ object ModelListClient {
     private const val TAG = "ModelListClient"
 
     private val okHttpClient by lazy {
-        OkHttpClient.Builder()
+        SharedHttpClient.instance.newBuilder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
@@ -67,7 +67,7 @@ object ModelListClient {
         return try {
             val request = Request.Builder()
                 .url("$baseUrl/v1/models")
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .get()
                 .build()
 

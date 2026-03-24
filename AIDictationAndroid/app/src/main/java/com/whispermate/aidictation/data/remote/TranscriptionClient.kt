@@ -3,6 +3,7 @@ package com.whispermate.aidictation.data.remote
 import android.util.Log
 import com.whispermate.aidictation.BuildConfig
 import com.whispermate.aidictation.data.preferences.ApiConfigManager
+import com.whispermate.aidictation.data.preferences.ApiProvider
 import com.whispermate.aidictation.domain.model.Command
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -33,7 +34,7 @@ object TranscriptionClient {
     private const val TAG = "TranscriptionClient"
 
     private val okHttpClient by lazy {
-        OkHttpClient.Builder()
+        SharedHttpClient.instance.newBuilder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
@@ -44,8 +45,8 @@ object TranscriptionClient {
         try {
             val config = ApiConfigManager.instance?.getTranscriptionConfig()
             val apiKey = config?.apiKey ?: BuildConfig.TRANSCRIPTION_API_KEY
-            val endpoint = config?.endpoint ?: BuildConfig.TRANSCRIPTION_ENDPOINT
-            val model = config?.model ?: BuildConfig.TRANSCRIPTION_MODEL
+            val endpoint = config?.endpoint ?: ApiProvider.GROQ.transcriptionEndpoint()
+            val model = config?.model ?: ApiProvider.GROQ.defaultTranscriptionModel()
             Log.d(TAG, "Transcribing file: ${audioFile.absolutePath}, size: ${audioFile.length()} bytes")
             Log.d(TAG, "Endpoint: $endpoint")
             Log.d(TAG, "Model: $model")
@@ -79,7 +80,7 @@ object TranscriptionClient {
 
             val request = Request.Builder()
                 .url(endpoint)
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .post(requestBody)
                 .build()
 
