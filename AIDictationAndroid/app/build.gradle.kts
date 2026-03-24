@@ -20,12 +20,15 @@ android {
     namespace = "com.whispermate.aidictation"
     compileSdk = 35
 
+    val keystorePassword = localProperties.getProperty("KEYSTORE_PASSWORD", "").trim()
     signingConfigs {
-        create("release") {
-            storeFile = rootProject.file("release.keystore")
-            storePassword = localProperties.getProperty("KEYSTORE_PASSWORD", "")
-            keyAlias = localProperties.getProperty("KEY_ALIAS", "release")
-            keyPassword = localProperties.getProperty("KEY_PASSWORD", "")
+        if (keystorePassword.isNotEmpty()) {
+            create("release") {
+                storeFile = rootProject.file("release.keystore")
+                storePassword = keystorePassword
+                keyAlias = localProperties.getProperty("KEY_ALIAS", "release").trim()
+                keyPassword = localProperties.getProperty("KEY_PASSWORD", "").trim()
+            }
         }
     }
 
@@ -39,14 +42,15 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // API keys from local.properties (do not commit)
-        buildConfigField("String", "TRANSCRIPTION_API_KEY", "\"${localProperties.getProperty("TRANSCRIPTION_API_KEY", "")}\"")
-        buildConfigField("String", "TRANSCRIPTION_ENDPOINT", "\"${localProperties.getProperty("TRANSCRIPTION_ENDPOINT", "https://api.openai.com/v1/audio/transcriptions")}\"")
-        buildConfigField("String", "TRANSCRIPTION_MODEL", "\"${localProperties.getProperty("TRANSCRIPTION_MODEL", "whisper-1")}\"")
+        buildConfigField("String", "TRANSCRIPTION_API_KEY", "\"${localProperties.getProperty("TRANSCRIPTION_API_KEY", "").trim()}\"")
+        buildConfigField("String", "TRANSCRIPTION_MODEL", "\"${localProperties.getProperty("TRANSCRIPTION_MODEL", "").trim()}\"")
+        // Provider name must match ApiProvider enum (OPENAI or GROQ). Endpoint is derived from provider at runtime.
+        buildConfigField("String", "DEFAULT_TRANSCRIPTION_PROVIDER", "\"${localProperties.getProperty("DEFAULT_TRANSCRIPTION_PROVIDER", "GROQ").trim()}\"")
 
-        // LLM API for word suggestions
-        buildConfigField("String", "GROQ_API_KEY", "\"${localProperties.getProperty("GROQ_API_KEY", "")}\"")
-        buildConfigField("String", "GROQ_ENDPOINT", "\"${localProperties.getProperty("GROQ_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")}\"")
-        buildConfigField("String", "GROQ_MODEL", "\"${localProperties.getProperty("GROQ_MODEL", "openai/gpt-oss-20b")}\"")
+        // LLM API for post-processing and suggestions
+        buildConfigField("String", "GROQ_API_KEY", "\"${localProperties.getProperty("GROQ_API_KEY", "").trim()}\"")
+        buildConfigField("String", "GROQ_MODEL", "\"${localProperties.getProperty("GROQ_MODEL", "").trim()}\"")
+        buildConfigField("String", "DEFAULT_POSTPROCESSING_PROVIDER", "\"${localProperties.getProperty("DEFAULT_POSTPROCESSING_PROVIDER", "GROQ").trim()}\"")
     }
 
     buildTypes {
@@ -56,7 +60,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     compileOptions {
@@ -105,10 +109,7 @@ dependencies {
     implementation(libs.datastore.preferences)
 
     // Networking
-    implementation(libs.retrofit)
-    implementation(libs.retrofit.moshi)
     implementation(libs.okhttp)
-    implementation(libs.okhttp.logging)
     implementation(libs.moshi)
     ksp(libs.moshi.kotlin)
 

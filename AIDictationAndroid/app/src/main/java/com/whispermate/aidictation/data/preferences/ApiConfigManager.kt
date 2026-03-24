@@ -39,6 +39,16 @@ enum class ApiProvider(val displayName: String) {
         OPENAI -> "https://api.openai.com"
         GROQ -> "https://api.groq.com/openai"
     }
+
+    fun defaultTranscriptionModel(): String = when (this) {
+        OPENAI -> "whisper-1"
+        GROQ -> "whisper-large-v3-turbo"
+    }
+
+    fun defaultLlmModel(): String = when (this) {
+        OPENAI -> "gpt-4o-mini"
+        GROQ -> "openai/gpt-oss-20b"
+    }
 }
 
 data class ApiConfig(
@@ -64,15 +74,9 @@ class ApiConfigManager @Inject constructor(
         var instance: ApiConfigManager? = null
             private set
 
-        fun defaultTranscriptionModel(provider: ApiProvider): String = when (provider) {
-            ApiProvider.OPENAI -> "whisper-1"
-            ApiProvider.GROQ -> "whisper-large-v3-turbo"
-        }
+        fun defaultTranscriptionModel(provider: ApiProvider): String = provider.defaultTranscriptionModel()
 
-        fun defaultPostProcessingModel(provider: ApiProvider): String = when (provider) {
-            ApiProvider.OPENAI -> "gpt-4o-mini"
-            ApiProvider.GROQ -> "openai/gpt-oss-20b"
-        }
+        fun defaultPostProcessingModel(provider: ApiProvider): String = provider.defaultLlmModel()
     }
 
     // MARK: - Private Properties
@@ -217,21 +221,21 @@ class ApiConfigManager @Inject constructor(
 
     // MARK: - Private Methods
 
-    private fun defaultTranscriptionProvider(): ApiProvider {
-        return if (BuildConfig.TRANSCRIPTION_ENDPOINT.contains("groq")) ApiProvider.GROQ else ApiProvider.OPENAI
-    }
+    private fun defaultTranscriptionProvider(): ApiProvider =
+        runCatching { ApiProvider.valueOf(BuildConfig.DEFAULT_TRANSCRIPTION_PROVIDER) }
+            .getOrDefault(ApiProvider.GROQ)
 
-    private fun defaultPostProcessingProvider(): ApiProvider {
-        return if (BuildConfig.GROQ_ENDPOINT.contains("groq")) ApiProvider.GROQ else ApiProvider.OPENAI
-    }
+    private fun defaultPostProcessingProvider(): ApiProvider =
+        runCatching { ApiProvider.valueOf(BuildConfig.DEFAULT_POSTPROCESSING_PROVIDER) }
+            .getOrDefault(ApiProvider.GROQ)
 
     private fun buildDefaultTranscriptionConfig(): ApiConfig {
         val provider = defaultTranscriptionProvider()
         return ApiConfig(
             provider = provider,
             apiKey = BuildConfig.TRANSCRIPTION_API_KEY,
-            model = BuildConfig.TRANSCRIPTION_MODEL.ifEmpty { defaultTranscriptionModel(provider) },
-            endpoint = BuildConfig.TRANSCRIPTION_ENDPOINT.ifEmpty { provider.transcriptionEndpoint() }
+            model = BuildConfig.TRANSCRIPTION_MODEL.ifEmpty { provider.defaultTranscriptionModel() },
+            endpoint = provider.transcriptionEndpoint()
         )
     }
 
@@ -240,8 +244,8 @@ class ApiConfigManager @Inject constructor(
         return ApiConfig(
             provider = provider,
             apiKey = BuildConfig.GROQ_API_KEY,
-            model = BuildConfig.GROQ_MODEL.ifEmpty { defaultPostProcessingModel(provider) },
-            endpoint = BuildConfig.GROQ_ENDPOINT.ifEmpty { provider.llmEndpoint() }
+            model = BuildConfig.GROQ_MODEL.ifEmpty { provider.defaultLlmModel() },
+            endpoint = provider.llmEndpoint()
         )
     }
 }

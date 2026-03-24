@@ -6,6 +6,7 @@ build/
 
 # Local configuration
 local.properties
+release.keystore
 
 # Android Studio
 *.iml

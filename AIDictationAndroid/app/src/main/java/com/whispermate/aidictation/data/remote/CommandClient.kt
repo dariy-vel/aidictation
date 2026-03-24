@@ -3,6 +3,7 @@ package com.whispermate.aidictation.data.remote
 import android.util.Log
 import com.whispermate.aidictation.BuildConfig
 import com.whispermate.aidictation.data.preferences.ApiConfigManager
+import com.whispermate.aidictation.data.preferences.ApiProvider
 import com.whispermate.aidictation.domain.model.Command
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,7 +23,7 @@ object CommandClient {
     private const val TAG = "CommandClient"
 
     private val okHttpClient by lazy {
-        OkHttpClient.Builder()
+        SharedHttpClient.instance.newBuilder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
@@ -47,8 +48,8 @@ object CommandClient {
         try {
             val apiConfig = ApiConfigManager.instance?.getPostProcessingConfig()
             val apiKey = apiConfig?.apiKey ?: BuildConfig.GROQ_API_KEY
-            val endpoint = apiConfig?.endpoint ?: BuildConfig.GROQ_ENDPOINT
-            val model = apiConfig?.model ?: BuildConfig.GROQ_MODEL
+            val endpoint = apiConfig?.endpoint ?: ApiProvider.GROQ.llmEndpoint()
+            val model = apiConfig?.model ?: ApiProvider.GROQ.defaultLlmModel()
             if (apiKey.isEmpty()) {
                 return@withContext Result.failure(Exception("Post-processing API key not configured"))
             }
@@ -94,7 +95,7 @@ object CommandClient {
 
             val request = Request.Builder()
                 .url(endpoint)
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .addHeader("Content-Type", "application/json")
                 .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()
@@ -144,8 +145,8 @@ object CommandClient {
         try {
             val apiConfig = ApiConfigManager.instance?.getPostProcessingConfig()
             val apiKey = apiConfig?.apiKey ?: BuildConfig.GROQ_API_KEY
-            val endpoint = apiConfig?.endpoint ?: BuildConfig.GROQ_ENDPOINT
-            val model = apiConfig?.model ?: BuildConfig.GROQ_MODEL
+            val endpoint = apiConfig?.endpoint ?: ApiProvider.GROQ.llmEndpoint()
+            val model = apiConfig?.model ?: ApiProvider.GROQ.defaultLlmModel()
             if (apiKey.isEmpty()) {
                 return@withContext Result.failure(Exception("Post-processing API key not configured"))
             }
@@ -195,7 +196,7 @@ object CommandClient {
 
             val request = Request.Builder()
                 .url(endpoint)
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", "Bearer ${apiKey.trim()}")
                 .addHeader("Content-Type", "application/json")
                 .post(requestJson.toString().toRequestBody("application/json".toMediaType()))
                 .build()

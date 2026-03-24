@@ -6,15 +6,22 @@ sdk.dir=/path/to/Android/Sdk
 
 # Transcription API Configuration
 TRANSCRIPTION_API_KEY=your_openai_or_groq_api_key_here
-TRANSCRIPTION_ENDPOINT=https://api.openai.com/v1/audio/transcriptions
-TRANSCRIPTION_MODEL=whisper-1
 
-# For Groq, use:
-# TRANSCRIPTION_ENDPOINT=https://api.groq.com/openai/v1/audio/transcriptions
-# TRANSCRIPTION_MODEL=whisper-large-v3
+# Optional: override the default provider (OPENAI or GROQ). Defaults to GROQ.
+# DEFAULT_TRANSCRIPTION_PROVIDER=GROQ
 
-# LLM API Configuration (used for commands, cleanup, and suggestions)
-# Supports any OpenAI-compatible endpoint (Groq recommended for low latency)
+# Optional: override the default model for the selected provider.
+# OPENAI default: whisper-1
+# GROQ default:   whisper-large-v3-turbo
+# TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+
+# LLM API Configuration (used for post-processing, commands, and suggestions)
 GROQ_API_KEY=your_groq_api_key_here
-GROQ_ENDPOINT=https://api.groq.com/openai/v1/chat/completions
-GROQ_MODEL=llama-3.3-70b-versatile
+
+# Optional: override the default provider (OPENAI or GROQ). Defaults to GROQ.
+# DEFAULT_POSTPROCESSING_PROVIDER=GROQ
+
+# Optional: override the default model for the selected provider.
+# OPENAI default: gpt-4o-mini
+# GROQ default:   openai/gpt-oss-20b
+# GROQ_MODEL=openai/gpt-oss-20b

@@ -68,7 +68,7 @@ class AnimatedMicButton @JvmOverloads constructor(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        animator?.start()
+        // Don't start the animator until recording/processing begins
     }
 
     override fun onDetachedFromWindow() {
@@ -124,6 +124,7 @@ class AnimatedMicButton @JvmOverloads constructor(
         innerCircleAlpha = 0.3f
         // Tint mic orange
         micDrawable?.setTint(activeColor)
+        if (animator?.isRunning != true) animator?.start()
         invalidate()
     }
 
@@ -131,6 +132,7 @@ class AnimatedMicButton @JvmOverloads constructor(
         isRecording = false
         isProcessing = true
         audioLevel = 0f
+        if (animator?.isRunning != true) animator?.start()
         invalidate()
     }
 
@@ -145,6 +147,7 @@ class AnimatedMicButton @JvmOverloads constructor(
         innerCircleAlpha = 0f
         // Restore original tint
         micDrawable?.setTint(idleColor)
+        animator?.cancel()
         invalidate()
     }
 

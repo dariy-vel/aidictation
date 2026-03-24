@@ -53,6 +53,14 @@ class CircularMicButtonView @JvmOverloads constructor(
     private val barAnimators = arrayOfNulls<ValueAnimator>(TOTAL_BARS)
     private var processingAnimator: ValueAnimator? = null
 
+    // Single invalidate scheduled per animation frame for all bar animators
+    private var invalidatePending = false
+    private val invalidateRunnable = Runnable {
+        invalidatePending = false
+        invalidate()
+        if (barAnimators.any { it?.isRunning == true }) scheduleBarInvalidate()
+    }
+
     // Paint objects
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
@@ -201,6 +209,13 @@ class CircularMicButtonView @JvmOverloads constructor(
         }
     }
 
+    private fun scheduleBarInvalidate() {
+        if (!invalidatePending) {
+            invalidatePending = true
+            postOnAnimation(invalidateRunnable)
+        }
+    }
+
     private fun animateBarTo(index: Int, targetHeight: Float) {
         barAnimators[index]?.cancel()
         barAnimators[index] = ValueAnimator.ofFloat(barHeights[index], targetHeight).apply {
@@ -208,10 +223,11 @@ class CircularMicButtonView @JvmOverloads constructor(
             interpolator = springInterpolator
             addUpdateListener { animator ->
                 barHeights[index] = animator.animatedValue as Float
-                invalidate()
+                // Batched: one invalidate per frame covers all bar updates
             }
             start()
         }
+        scheduleBarInvalidate()
     }
 
     private fun startProcessingAnimation() {
